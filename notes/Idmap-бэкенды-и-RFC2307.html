@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Idmap-бэкенды члена домена и RFC2307</title>
+<link rel="stylesheet" href="../style.css">
+</head>
+<body>
+<nav><a href="../index.html">База знаний Samba AD DC</a></nav>
+<main><h1>Idmap-бэкенды члена домена и RFC2307</h1>
+<h2>Суть</h2>
+<p>Сводка по настройке ID-маппинга (idmap config) на Unix domain member — того, чего не хватает для завершения ввода в домен по <a href="Samba-%D0%BA%D0%B0%D0%BA-%D1%87%D0%BB%D0%B5%D0%BD-%D0%B4%D0%BE%D0%BC%D0%B5%D0%BD%D0%B0.html">Samba как член домена</a> и для шар с Windows ACL (привилегия и права требуют, чтобы пользователь/группа были «известны Unix», то есть имели uidNumber/gidNumber — см. <a href="%D0%9E%D0%B1%D1%89%D0%B8%D0%B9-%D1%80%D0%B5%D1%81%D1%83%D1%80%D1%81-%D1%81-Windows-ACL.html">Общий ресурс с Windows ACL</a>). Три основных бэкенда:</p>
+<ul>
+<li><strong><code>ad</code></strong> — ID и (опционально) shell/home читаются из RFC2307-атрибутов AD (uidNumber, gidNumber, loginShell, unixHomeDirectory); одноимённые страницы вики — <code>idmap config ad</code>, <code>Setting up RFC2307 in AD</code>;</li>
+<li><strong><code>rid</code></strong> — ID вычисляются алгоритмически из Windows RID;</li>
+<li><strong><code>autorid</code></strong> — как <code>rid</code>, но ID раздаются всем доменам автоматически, без per-domain конфигов.</li>
+</ul>
+<h2>Ключевое</h2>
+<h3>Общие правила для всех бэкендов</h3>
+<ul>
+<li><strong>На Samba AD DC строки <code>idmap config</code> не добавляют</strong> — бэкенды ID-маппинга в smb.conf контроллера не поддерживаются и ломают доступ к шарам (на DC своё хранилище <code>idmap.ldb</code>).</li>
+<li>Обязательна конфигурация <code>*</code> (default domain) на read-write бэкенде (обычно <code>tdb</code>); <code>ad</code>/<code>rid</code> — read-only и дефолтными быть не могут (<code>autorid</code> может обслуживать <code>*</code>).</li>
+<li>Диапазоны непрерывны, достаточно велики (с запасом на будущие объекты — расширять можно только верхнюю границу) и не пересекаются между <code>*</code> и доменами; диапазоны не должны начинаться с 999 или меньше (конфликт с локальными системными пользователями 0–999 и обычными Unix-пользователями от 1000).</li>
+<li>Все uidNumber/gidNumber в AD должны попадать в диапазон своего домена в smb.conf.</li>
+<li>Для каждого доверенного домена нужна отдельная конфигурация (кроме <code>autorid</code>).</li>
+<li>После правки: <code>smbcontrol all reload-config</code>.</li>
+</ul>
+<h3>Пример для бэкенда <code>ad</code> (Samba 4.6.0+)</h3>
+<pre><code>idmap config * : backend = tdb
+idmap config * : range = 3000-7999
+idmap config SAMDOM:backend = ad
+idmap config SAMDOM:schema_mode = rfc2307
+idmap config SAMDOM:range = 10000-999999
+idmap config SAMDOM:unix_nss_info = yes
+idmap config SAMDOM:unix_primary_group = yes
+</code></pre>
+<ul>
+<li>Минимально нужны <code>uidNumber</code> пользователям и <code>gidNumber</code> группам; объекты без атрибутов в Unix не маппятся вовсе.</li>
+<li><code>unix_nss_info = yes</code> подтягивает из AD также loginShell и unixHomeDirectory (до 4.6.0 вместо этого <code>winbind nss info = rfc2307</code>, а shell/home задают шаблонами <code>template shell</code>, <code>template homedir</code>).</li>
+<li>Обязателен <code>gidNumber</code> у группы Domain Users (она первичная у всех пользователей), иначе winbind не смапит учётки.</li>
+<li>До 3000000 (диапазон xidNumber на DC) атрибуты RFC2307 не имеют отношения — на членах домена они не используются.</li>
+</ul>
+<h3>Бэкенд <code>rid</code></h3>
+<pre><code>idmap config * : backend = tdb
+idmap config * : range = 3000-7999
+idmap config SAMDOM : backend = rid
+idmap config SAMDOM : range = 10000-999999
+template shell = /bin/bash
+template homedir = /home/%U
+</code></pre>
+<ul>
+<li>ID вычисляются из RID (формула — в man <code>idmap_rid(8)</code>); RFC2307-атрибуты игнорируются.</li>
+<li>Одинаковый <code>[global]</code> на всех членах даёт одинаковые ID; при смене диапазона ID изменятся.</li>
+<li>Исключить отдельных пользователей/группы нельзя; shell и home одинаковы для всех (задаются шаблонами).</li>
+</ul>
+<h3>Бэкенд <code>autorid</code></h3>
+<pre><code>idmap config * : backend = autorid
+idmap config * : range = 10000-24999999
+idmap config * : rangesize = 200000
+template shell = /bin/bash
+template homedir = /home/%U
+</code></pre>
+<ul>
+<li>Раздаёт ID всем доменам автоматически; per-domain конфиги не нужны (доверенные домены покрываются сами).</li>
+<li><strong>ID не совпадают между разными членами домена</strong> — в отличие от <code>rid</code> с одинаковым конфигом.</li>
+<li>Нельзя <code>winbind use default domain = yes</code> — логин в формате <code>DOMAIN\username</code>.</li>
+</ul>
+<h3>RFC2307-атрибуты в AD (Setting up RFC2307 in AD)</h3>
+<ul>
+<li>Польза: центральное администрирование ID в AD, одинаковые ID на членах с бэкендом <code>ad</code>, индивидуальные shell/home, управление из ADUC — без локальных баз маппинга, которые могут повреждаться и терять владельцев файлов.</li>
+<li>Включение: в новом домене — <code>--use-rfc2307</code> при provision (устанавливает NIS-расширения, недостатков нет). В существующем — проверить наличие дерева ypServ30:</li>
+</ul>
+<pre><code>ldbsearch -H /usr/local/samba/private/sam.ldb -s base -b \
+CN=ypservers,CN=ypServ30,CN=RpcServices,CN=System,DC=samdom,DC=example,DC=com cn
+</code></pre>
+<p>Одна запись — расширения уже установлены. Иначе: найти DC с ролью Schema Master (<code>samba-tool fsmo show | grep SchemaMasterRole</code>), остановить Samba, поправить в <code>ypServ30.ldif</code> плейсхолдеры <code>${DOMAINDN}</code>, <code>${NETBIOSNAME}</code>, <code>${NISDOMAIN}</code> и импортировать:</p>
+<pre><code>ldbmodify -H /usr/local/samba/private/sam.ldb /tmp/ypServ30.ldif --option=&quot;dsdb:schema update allowed&quot;=true
+</code></pre>
+<p>затем запустить Samba — схема реплицируется на все DC. Перед обновлением схемы — проверить, что есть рабочий бэкап домена.</p>
+<ul>
+<li>Атрибуты задают через вкладку Unix Attributes в ADUC (нужны именно NIS-расширения); атрибуты <strong>не добавляются автоматически</strong>.</li>
+</ul>
+<h2>Подводные камни</h2>
+<ul>
+<li><strong>Никогда не давать gidNumber группе Domain Admins</strong> — ломает sysvol (sysvolcheck); для Unix-администрирования создают отдельную группу с gidNumber (см. <a href="%D0%9E%D0%B1%D1%89%D0%B8%D0%B9-%D1%80%D0%B5%D1%81%D1%83%D1%80%D1%81-%D1%81-Windows-ACL.html">Общий ресурс с Windows ACL</a>).</li>
+<li>Не менять <code>primaryGroupID</code> пользователей — Windows рассчитывает на членство всех в Domain Users; другая первичная Unix-группа — через <code>unix_primary_group = yes</code> (4.6.0+).</li>
+<li>Следить за уникальностью ID вручную: переиспользованный ID удалённой учётки даёт новому владельцу доступ к старым файлам; ADUC отслеживает ID пользователей/групп, но не компьютеров (машинным учёткам uidNumber задают вручную, если они должны видеть шары).</li>
+<li>idNumber-диапазоны не должны пересекаться и не должны начинаться с ≤999.</li>
+<li><code>hash</code>-бэкенд помечен «Do not use».</li>
+<li>Строки <code>idmap config</code> из конфига члена домена на DC копировать нельзя.</li>
+</ul>
+<h2>Связанные заметки</h2>
+<ul>
+<li><a href="Samba-%D0%BA%D0%B0%D0%BA-%D1%87%D0%BB%D0%B5%D0%BD-%D0%B4%D0%BE%D0%BC%D0%B5%D0%BD%D0%B0.html">Samba как член домена</a></li>
+<li><a href="%D0%9E%D0%B1%D1%89%D0%B8%D0%B9-%D1%80%D0%B5%D1%81%D1%83%D1%80%D1%81-%D1%81-Windows-ACL.html">Общий ресурс с Windows ACL</a></li>
+<li><a href="%D0%A3%D1%81%D1%82%D0%B0%D0%BD%D0%BE%D0%B2%D0%BA%D0%B0-Samba-AD-DC.html">Установка Samba AD DC</a></li>
+<li><a href="%D0%9F%D1%80%D0%B8%D1%81%D0%BE%D0%B5%D0%B4%D0%B8%D0%BD%D0%B5%D0%BD%D0%B8%D0%B5-%D0%B2%D1%82%D0%BE%D1%80%D0%BE%D0%B3%D0%BE-DC-%D0%BA-%D0%B4%D0%BE%D0%BC%D0%B5%D0%BD%D1%83.html">Присоединение второго DC к домену</a></li>
+</ul>
+</main>
+</body>
+</html>

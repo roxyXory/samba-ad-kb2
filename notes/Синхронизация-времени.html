@@ -1,0 +1,267 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Синхронизация времени (Time Synchronisation)</title>
+<link rel="stylesheet" href="../style.css">
+</head>
+<body>
+<nav><a href="../index.html">База знаний Samba AD DC</a></nav>
+<main><h1>Синхронизация времени (Time Synchronisation)</h1>
+<h2>Суть</h2>
+<p>В Active Directory обязательна точная синхронизация времени: Kerberos требует корректных меток времени для защиты от replay-атак, а AD использует время для разрешения конфликтов репликации. Максимально допустимое отклонение по умолчанию — 5 минут; при большей разнице доступ запрещается, и пользователь не может обращаться к шарам или опрашивать каталог. Samba поддерживает <code>ntpd</code> (ntp.org) и <code>chrony</code> (chrony.tuxfamily.org). Сервер времени должен быть настроен на <strong>всех</strong> Samba AD DC.</p>
+<h2>Ключевое</h2>
+<h3>Допустимое отклонение</h3>
+<p>Максимум по умолчанию — <strong>5 минут</strong>. Если у члена домена или DC разница больше (в любую сторону), доступ запрещён: пользователь не может получить доступ к общим ресурсам и запросам к каталогу.</p>
+<h3>Рекомендуемая иерархия источников времени</h3>
+<pre><code>internet time server
+          ^
+          |
+          |
+  PDC Emulator DC
+   ^         ^
+   |         |
+   |         |
+Other DC &lt;----Workstation
+</code></pre>
+<p>Только PDC Emulator DC берёт время с внешних серверов; остальные DC — с PDC Emulator; рабочие станции — с любого DC. По умолчанию присоединённые к домену Windows-клиенты синхронизируются через протокол <strong>NT5DS</strong> (с цифровой подписью), которую Samba обеспечивает при опциях <code>mssntp</code> и <code>ntpsigndsocket</code>. Настройка NT5DS рекомендуется вместо обычного NTP на всех машинах.</p>
+<h3>Требования для DC</h3>
+<ul>
+<li><code>ntpd</code> &gt;= 4.2.6 с http://www.ntp.org, собранный с поддержкой signed NTP (<code>--enable-ntp-signd</code> при сборке NTP), <strong>или</strong></li>
+<li><code>chrony</code> &gt;= 3.0 с https://chrony.tuxfamily.org, собранный с <code>--enable-ntp-signd</code>.</li>
+</ul>
+<p>Каталог <code>ntp_signd</code> появится только после первого запуска Samba — это не проблема: настройте всё, и после старта Samba всё заработает.</p>
+<h3>Права на каталог ntp_signd</h3>
+<p>Проверка (вариант для ntpd, пользователь <code>ntp</code>):</p>
+<pre><code># ls -ld /usr/local/samba/var/lib/ntp_signd/
+drwxr-x--- 2 root ntp 4096  1. May 09:30 /usr/local/samba/var/lib/ntp_signd/
+</code></pre>
+<p>Установка прав для ntpd:</p>
+<pre><code># chown root:ntp /usr/local/samba/var/lib/ntp_signd/
+# chmod 750 /usr/local/samba/var/lib/ntp_signd/
+</code></pre>
+<p>Для chrony пользователь обычно <code>_chrony</code> (вывод <code>ls -ld</code> показывает <code>drwxr-x--- 2 root _chrony ...</code>), и права ставятся так:</p>
+<pre><code># chown root:_chrony /usr/local/samba/var/lib/ntp_signd/
+# chmod 750 /usr/local/samba/var/lib/ntp_signd/
+</code></pre>
+<h3>Настройка ntpd на DC</h3>
+<p>Файл конфигурации — <code>/etc/ntpd.conf</code>. Минимальный пример: синхронизация с тремя внешними NTP-серверами и обслуживание клиентов через signed NTP:</p>
+<pre><code># Local clock. Note that is not the &quot;localhost&quot; address!
+server 127.127.1.0
+fudge  127.127.1.0 stratum 10
+
+# Where to retrieve the time from
+server 0.pool.ntp.org     iburst prefer
+server 1.pool.ntp.org     iburst prefer
+server 2.pool.ntp.org     iburst prefer
+
+driftfile       /var/lib/ntp/ntp.drift
+logfile         /var/log/ntp
+ntpsigndsocket  /usr/local/samba/var/lib/ntp_signd/
+
+# Access control
+# Default restriction: Allow clients only to query the time
+restrict default kod nomodify notrap nopeer limited mssntp
+
+# No restrictions for &quot;localhost&quot;
+restrict 127.0.0.1
+
+# Enable the time sources to only provide time to this host
+restrict 0.pool.ntp.org   mask 255.255.255.255    nomodify notrap nopeer noquery
+restrict 1.pool.ntp.org   mask 255.255.255.255    nomodify notrap nopeer noquery
+restrict 2.pool.ntp.org   mask 255.255.255.255    nomodify notrap nopeer noquery
+</code></pre>
+<h3>Настройка chrony на DC</h3>
+<p>Файл конфигурации — <code>/etc/chrony/chrony.conf</code>. Минимальный пример:</p>
+<pre><code># Welcome to the chrony configuration file. See chrony.conf(5) for more
+# information about usuable directives.
+
+# This directive specify the location of the file containing ID/key pairs for
+# NTP authentication.
+keyfile /etc/chrony/chrony.keys
+
+# This directive specify the file into which chronyd will store the rate
+# information.
+driftfile /var/lib/chrony/chrony.drift
+
+# Uncomment the following line to turn logging on.
+#log tracking measurements statistics
+
+# Log files location.
+logdir /var/log/chrony
+
+# Stop bad estimates upsetting machine clock.
+maxupdateskew 100.0
+
+# This directive tells 'chronyd' to parse the 'adjtime' file to find out if the
+# real-time clock keeps local time or UTC. It overrides the 'rtconutc' directive.
+hwclockfile /etc/adjtime
+
+# This directive enables kernel synchronisation (every 11 minutes) of the
+# real-time clock. Note that it can't be used along with the 'rtcfile' directive.
+rtcsync
+
+# Step the system clock instead of slewing it if the adjustment is larger than
+# one second, but only in the first three clock updates.
+makestep 1 3
+
+# ipaddress of this DC
+bindcmdaddress 192.168.0.2
+
+# The source, where we are receiving the time from
+server 0.pool.ntp.org     iburst
+server 1.pool.ntp.org     iburst
+server 2.pool.ntp.org     iburst
+
+# dns netmask
+allow 192.168.0.0/24
+
+ntpsigndsocket  /usr/local/samba/var/lib/ntp_signd
+</code></pre>
+<h3>Unix Domain Member: ntpd</h3>
+<p>Член домена только потребляет время — подписанный NTP (signd) ему не нужен. Минимальный <code>/etc/ntpd.conf</code>: синхронизация с DC1 и DC2, время другим хостам не раздаётся:</p>
+<pre><code># Local clock. Note that is not the &quot;localhost&quot; address!
+server 127.127.1.0
+fudge  127.127.1.0 stratum 10
+
+# Where to retrieve the time from
+server DC1.samdom.example.com     iburst prefer
+server DC2.samdom.example.com     iburst
+
+driftfile /var/lib/ntp/ntp.drift
+logfile   /var/log/ntp
+
+# Access control
+# Default restriction: Disallow everything
+restrict default ignore
+
+# No restrictions for &quot;localhost&quot;
+restrict 127.0.0.1
+
+# Enable the time sources only to only provide time to this host
+restrict DC1.samdom.example.com   mask 255.255.255.255    nomodify notrap nopeer noquery
+restrict DC2.samdom.example.com   mask 255.255.255.255    nomodify notrap nopeer noquery
+</code></pre>
+<h3>Unix Domain Member: chrony</h3>
+<p>Файл конфигурации — <code>/etc/chrony/chrony.conf</code>. Минимальный пример (синхронизация с DC1 и DC2):</p>
+<pre><code># Welcome to the chrony configuration file. See chrony.conf(5) for more
+# information about usuable directives.
+
+# This directive specify the location of the file containing ID/key pairs for
+# NTP authentication.
+keyfile /etc/chrony/chrony.keys
+
+# This directive specify the file into which chronyd will store the rate
+# information.
+driftfile /var/lib/chrony/chrony.drift
+
+# Uncomment the following line to turn logging on.
+#log tracking measurements statistics
+
+# Log files location.
+logdir /var/log/chrony
+
+# Stop bad estimates upsetting machine clock.
+maxupdateskew 100.0
+
+# This directive tells 'chronyd' to parse the 'adjtime' file to find out if the
+# real-time clock keeps local time or UTC. It overrides the 'rtconutc' directive.
+hwclockfile /etc/adjtime
+
+# This directive enables kernel synchronisation (every 11 minutes) of the
+# real-time clock. Note that it can't be used along with the 'rtcfile' directive.
+rtcsync
+
+# Step the system clock instead of slewing it if the adjustment is larger than
+# one second, but only in the first three clock updates.
+makestep 1 3
+
+# ipaddress of this Unix domain member
+bindcmdaddress 192.168.0.6
+
+# The source, where we are receiving the time from
+server DC1.samdom.example.com    iburst
+server DC2.samdom.example.com    iburst
+</code></pre>
+<h3>Unix Domain Member: systemd-timesyncd</h3>
+<p>Демон читает конфигурацию из <code>/etc/systemd/timesyncd.conf</code>, из network-конфигурации (<code>/etc/systemd/network/your.network</code>) или из настроек DHCP.</p>
+<p>Вариант 1 — <code>/etc/systemd/timesyncd.conf</code>:</p>
+<pre><code>[Time]
+NTP=DC1.samdom.example.com DC2.samdom.example.com
+FallbackNTP=the.same.ntp-server.as.your.dc.points.to one-extra.ntp-server.as.your.dc.points.to
+</code></pre>
+<p>Fallback-серверы в примере используются, но это не обязательно.</p>
+<p>Вариант 2 — серверы времени в network-конфигурации (например, <code>/etc/systemd/network/20-wired-dev1.network</code>):</p>
+<pre><code>#/etc/systemd/network/20-wired-dev1.network
+[Network]
+NTP=dc1.samdom.example.com
+NTP=dc2.samdom.example.com
+
+[Address]
+Address=192.168.0.200/24
+
+[Route]
+Destination=0.0.0.0/0
+Gateway=192.168.0.1
+</code></pre>
+<p>После изменений включить и запустить демон, затем проверить:</p>
+<pre><code>systemctl enable systemd-timesyncd
+systemctl start systemd-timesyncd
+</code></pre>
+<pre><code>systemctl status systemd-timesyncd
+</code></pre>
+<pre><code>journalctl -u systemd-timesyncd
+</code></pre>
+<pre><code>timedatectl status
+</code></pre>
+<p>При необходимости — список зон и смена часового пояса:</p>
+<pre><code>timedatectl list-timezones
+</code></pre>
+<pre><code>timedatectl set-timezone Europe/Amsterdam
+</code></pre>
+<blockquote>
+<p>На странице вики команда приведена с опечаткой — <code>set-timezones</code> (с «s»); timedatectl такой глагол не знает («Unknown command verb 'set-timezones', did you mean 'set-timezone'?»), правильный глагол — <code>set-timezone</code>.</p>
+</blockquote>
+<p>Смысл timesyncd для член-сервера: работает нормально и не требует установки дополнительного ПО.</p>
+<h3>Windows Domain Member</h3>
+<p>По умолчанию члены AD-домена используют любой DC как источник времени (NT5DS) — при настроенном на DC ntp обычно ничего перенастраивать не нужно. Для пользовательских источников — через GPO (редактирование требует RSAT):</p>
+<ol>
+<li>Войти под учёткой с правом редактирования групповых политик (например, администратор домена AD).</li>
+<li>Открыть Group Policy Management Console.</li>
+<li>Правый клик по домену AD → «Create a GPO in this domain, and Link it here».</li>
+<li>Задать имя GPO, например «Time Sources».</li>
+<li>Правый клик по созданному GPO → «Edit» — откроется Group Policy Management Editor.</li>
+<li>Перейти в <code>Computer Configuration → Policies → Administrative Templates → System → Windows Time Service → Time Providers</code>, открыть «Configure Windows NTP Client»:
+<ul>
+<li>Включить политику.</li>
+<li>В поле <strong>NtpServer</strong> ввести FQDN NTP-сервера с флагом <code>0x9</code> (несколько серверов — через пробел).</li>
+<li>Оставить тип <strong>NT5DS</strong>.</li>
+<li>При необходимости обновить дополнительные параметры.</li>
+</ul>
+</li>
+<li>Там же открыть «Enable Windows NTP Client» и включить политику.</li>
+<li>Сохранить (OK), закрыть редактор и консоль.</li>
+</ol>
+<h2>Подводные камни</h2>
+<ul>
+<li><strong>Отклонение более 5 минут = отказ в доступе</strong>: Kerberos не примет аутентификацию, пользователь не попадёт на шары и в каталог.</li>
+<li><strong>Отключение PDC Emulator</strong>: если PDC Emulator DC уходит в оффлайн, остальные DC продолжают искать его, и время может «уплыть». Обход: настроить одни и те же внешние серверы времени на всех DC, а при невозможности быстро перезапустить PDC Emulator — передать или захватить роль PDC Emulator другому DC (<a href="%D0%9F%D0%B5%D1%80%D0%B5%D0%B4%D0%B0%D1%87%D0%B0-%D0%B8-%D0%B7%D0%B0%D1%85%D0%B2%D0%B0%D1%82-FSMO-%D1%80%D0%BE%D0%BB%D0%B5%D0%B9.html">Передача и захват FSMO ролей</a>).</li>
+<li><strong>ntpsec с Samba не работает</strong> (Debian bug 1033088, NTPsec issue 785); пока замечание на странице не убрано, рекомендуется использовать только Chrony. В пакете ntpsec Debian Trixie проблема исправлена, в Bookworm — ещё нет.</li>
+<li><strong>Аутентифицированная синхронизация с Windows 2000 клиентами не поддерживается.</strong></li>
+<li><strong>Каталог <code>ntp_signd</code> не существует до первого запуска Samba</strong> — настройте время заранее, заработает после старта Samba.</li>
+<li><strong>Путь к <code>ntp_signd</code> зависит от дистрибутива</strong> — может быть, например, <code>/var/lib/samba/ntp_signd/</code>; тогда его нужно поменять и в конфиге (ntpd.conf / chrony.conf).</li>
+<li><strong>Виртуальные машины</strong>: добавьте <code>tinker panic 0</code> в конец <code>ntp.conf</code> — тогда NTP не будет паниковать и завершаться при любом смещении времени (у ВМ нет физических часов, их могут поставить на паузу и запустить часами позже). Подробности: https://www.redhat.com/en/blog/avoiding-clock-drift-vms</li>
+<li><strong>GPO для Windows-клиентов</strong>: тип по умолчанию <strong>NT5DS игнорирует параметр NtpServer</strong> и синхронизируется с DC. Если на DC не настроены <code>mssntp</code> с <code>ntpsigndsocket</code>, используйте Type <strong>NTP</strong>. Для клиентов, долго не имеющих связи с DC (ноутбуки), — Type <strong>AllSync</strong> с NtpServer <code>time.windows.com,0x9</code>: клиент будет пробовать и NT5DS к DC, и NTP к NtpServer.</li>
+<li>При включённом SELinux на сервере см. страницу вики «Time Synchronisation - SELinux Labeling and Policy» (в хранилище отдельной заметки нет).</li>
+</ul>
+<h2>Связанные заметки</h2>
+<ul>
+<li><a href="%D0%A3%D1%81%D1%82%D0%B0%D0%BD%D0%BE%D0%B2%D0%BA%D0%B0-Samba-AD-DC.html">Установка Samba AD DC</a></li>
+<li><a href="%D0%9F%D1%80%D0%B8%D1%81%D0%BE%D0%B5%D0%B4%D0%B8%D0%BD%D0%B5%D0%BD%D0%B8%D0%B5-%D0%B2%D1%82%D0%BE%D1%80%D0%BE%D0%B3%D0%BE-DC-%D0%BA-%D0%B4%D0%BE%D0%BC%D0%B5%D0%BD%D1%83.html">Присоединение второго DC к домену</a></li>
+<li><a href="%D0%9F%D0%B5%D1%80%D0%B5%D0%B4%D0%B0%D1%87%D0%B0-%D0%B8-%D0%B7%D0%B0%D1%85%D0%B2%D0%B0%D1%82-FSMO-%D1%80%D0%BE%D0%BB%D0%B5%D0%B9.html">Передача и захват FSMO ролей</a></li>
+<li><a href="%D0%94%D0%B8%D0%B0%D0%B3%D0%BD%D0%BE%D1%81%D1%82%D0%B8%D0%BA%D0%B0-AD-DC.html">Диагностика AD DC</a></li>
+</ul>
+</main>
+</body>
+</html>

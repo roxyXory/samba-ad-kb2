@@ -1,0 +1,237 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LDAPS и TLS-сертификаты на Samba AD DC</title>
+<link rel="stylesheet" href="../style.css">
+</head>
+<body>
+<nav><a href="../index.html">База знаний Samba AD DC</a></nav>
+<main><h1>LDAPS и TLS-сертификаты на Samba AD DC</h1>
+<h2>Суть</h2>
+<p>Active Directory использует LDAP для чтения и записи, и по умолчанию LDAP-соединения не шифруются; чтобы защитить трафик, применяют SSL/TLS — тогда LDAP-клиенты (SSSD, Keycloak, системы мониторинга, сетевые устройства и т. д.) подключаются по LDAPS на порт 636. По странице вики, поддерживаемые версии Samba (4.11.0 и новее) требуют GnuTLS, поэтому LDAP доступен по умолчанию; при первом запуске Samba сама создаёт приватный ключ, самоподписанный сертификат и CA-сертификат со сроком жизни 700 дней. В продакшене его заменяют собственным или выданным доверенным CA сертификатом с CN = FQDN контроллера; параметрами <code>tls *</code> в <code>smb.conf</code> управляют файлами ключа, сертификата и CA, а с Samba 4.19 сертификаты можно перезагружать без перезапуска службы.</p>
+<h2>Ключевое</h2>
+<h3>Общие сведения (страница «Configuring LDAP over SSL (LDAPS) on a Samba AD DC»)</h3>
+<ul>
+<li>Поддерживаемые версии Samba (4.11.0 и новее) требуют GnuTLS, поэтому LDAP доступен по умолчанию.</li>
+<li>Приватный ключ должен читаться без пароля, то есть быть <strong>незашифрованным</strong> (без passphrase).</li>
+<li>Все файлы, которые использует Samba, должны быть в формате PEM (Base64-encoded DER) — содержимое между строками вида <code>-----BEGIN CERTIFICATE-----</code> и <code>-----END CERTIFICATE-----</code>.</li>
+<li>Промежуточные сертификаты (intermediate certificates) добавляются в файл cert.pem <strong>после</strong> серверного сертификата.</li>
+<li>Все параметры, начинающиеся на <code>tls</code>, задаются в секции <code>[global]</code> файла <code>smb.conf</code>. На странице сказано: «After any changes, you will have to restart Samba» — после любых изменений требуется перезапустить Samba (но с версии 4.19 сертификаты можно перезагружать без рестарта, см. ниже).</li>
+<li>Пути к файлам параметров <code>tls*</code> отсчитываются от <code>private dir</code>, если путь не начинается с <code>/</code> (man <code>smb.conf(5)</code>); значение по умолчанию <code>private dir = ${prefix}/private</code>. Примеры на странице вики даны для самособранной Samba: <code>/usr/local/samba/private/tls/</code>.</li>
+</ul>
+<h3>Параметры smb.conf для LDAPS</h3>
+<p>Значения по умолчанию — из man-страницы <code>smb.conf(5)</code> (раздел «current»; на момент проверки — версия 4.25.0):</p>
+<table>
+<thead>
+<tr>
+<th>Параметр</th>
+<th>По умолчанию</th>
+<th>Назначение</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>tls enabled</code></td>
+<td><code>yes</code></td>
+<td>Если <code>yes</code>, Samba использует TLS везде, где возможно.</td>
+</tr>
+<tr>
+<td><code>tls keyfile</code></td>
+<td><code>tls/key.pem</code></td>
+<td>Файл (PEM) с приватным RSA-ключом. Ключ должен быть доступен без пароля (не зашифрован).</td>
+</tr>
+<tr>
+<td><code>tls certfile</code></td>
+<td><code>tls/cert.pem</code></td>
+<td>Файл (PEM) с RSA-сертификатом, используемым как TLS-серверный сертификат. С версии 4.21 в man-странице явно сказано: при необходимости может также содержать дополнительные промежуточные сертификаты, отправляемые во время TLS-рукопожатия.</td>
+</tr>
+<tr>
+<td><code>tls cafile</code></td>
+<td><code>tls/ca.pem</code></td>
+<td>Файл (PEM) с CA-сертификатами корневых CA, которым доверяют подписывать сертификаты, либо промежуточными CA-сертификатами.</td>
+</tr>
+<tr>
+<td><code>tls priority</code></td>
+<td><code>NORMAL:-VERS-SSL3.0</code></td>
+<td>Строка приоритетов (GnuTLS cipher priority string), которая дописывается к списку приоритетов GnuTLS по умолчанию; протокол SSL 3.0 дополнительно отключён.</td>
+</tr>
+<tr>
+<td><code>tls verify peer</code></td>
+<td><code>as_strict_as_possible</code></td>
+<td>Насколько строго <strong>клиент</strong> проверяет сертификат и имя узла-пира (см. значения ниже).</td>
+</tr>
+<tr>
+<td><code>tls crlfile</code></td>
+<td>(пусто)</td>
+<td>Файл со списком отзыва сертификатов (CRL).</td>
+</tr>
+<tr>
+<td><code>tls trust system cas</code></td>
+<td><code>no</code></td>
+<td>Доверять системному набору доверенных CA. Man-страница предупреждает: это означает доверие <strong>всем</strong> CA, установленным в системе.</td>
+</tr>
+<tr>
+<td><code>tls ca directories</code></td>
+<td>значения по умолчанию нет</td>
+<td>Список каталогов с CA-сертификатами (PEM).</td>
+</tr>
+<tr>
+<td><code>ldap server require strong auth</code></td>
+<td><code>yes</code></td>
+<td>Требует подписи или подписи и шифрования LDAP-трафика; значения и их смена в 4.21 — см. ниже.</td>
+</tr>
+</tbody>
+</table>
+<p>Значения <code>tls verify peer</code> (в порядке возрастания строгости; man <code>smb.conf(5)</code>):</p>
+<ul>
+<li><code>no_check</code> — сертификат не проверяется вообще, что допускает тривиальные man-in-the-middle-атаки;</li>
+<li><code>ca_only</code> — проверяется подпись от CA, заданного в <code>tls cafile</code> (либо через <code>tls ca directories</code> или <code>tls trust system cas</code>); требуется хотя бы один валидный CA-сертификат, проверяется также срок действия, а при настроенном <code>tls crlfile</code> — и отзыв;</li>
+<li><code>ca_and_name_if_available</code> — то же плюс проверка имени узла, если оно передано прикладным уровнем и не является IP-адресом;</li>
+<li><code>ca_and_name</code> — имя узла обязательно, проверяется даже IP-адрес;</li>
+<li><code>as_strict_as_possible</code> — все предыдущие проверки плюс обязательное требование настроенного <code>tls crlfile</code>; «future versions of Samba may implement additional checks».</li>
+</ul>
+<h3>Автогенерируемый самоподписанный сертификат (по умолчанию)</h3>
+<p>При первом запуске Samba сама создаёт приватный ключ, самоподписанный сертификат и CA-сертификат:</p>
+<ul>
+<li><code>/usr/local/samba/private/tls/ca.pem</code></li>
+<li><code>/usr/local/samba/private/tls/cert.pem</code></li>
+<li><code>/usr/local/samba/private/tls/key.pem</code></li>
+</ul>
+<p>Сертификаты действительны 700 дней после создания — срок жизни при автогенерации жёстко зашит в <code>source4/lib/tls/tlscert.c</code>. Проверка по исходнику (тег <code>samba-4.19.0</code>, <code>source4/lib/tls/tlscert.c</code>): строка 31 <code>#define LIFETIME 700*24*60*60</code>, строка 51 <code>time_t activation = time(NULL), expiry = activation + LIFETIME;</code>. Там же видно, что генерация пропускается, если хотя бы один из трёх файлов уже существует (строка 54), CN берётся из имени хоста (строки 87–88 и 109–111), а приватный ключ сохраняется с правами <code>0600</code> (строка 144); размер ключа RSA — 4096 бит, а в режиме FIPS 140 — 3072 бита (строки 33–34).</p>
+<p>По умолчанию TLS включён (<code>tls enabled = yes</code>), используются перечисленные файлы, что соответствует таким параметрам <code>smb.conf</code> (дословно со страницы):</p>
+<pre><code>tls enabled  = yes
+tls keyfile  = tls/key.pem
+tls certfile = tls/cert.pem
+tls cafile   = tls/ca.pem
+</code></pre>
+<h3>Замена: собственный самоподписанный сертификат</h3>
+<ol>
+<li>Перейти в каталог, где будут храниться ключ и сертификат:</li>
+</ol>
+<pre><code class="language-bash"># cd /usr/local/samba/private/tls/
+</code></pre>
+<ol start="2">
+<li>Создать приватный ключ (2048 бит) и самоподписанный сертификат на 1 год (<code>-nodes</code> — ключ без пароля). Страница подчёркивает: при запросе <code>Common Name</code> обязательно указать FQDN контроллера, для которого создаётся сертификат, — <code>$(hostname -f)</code>:</li>
+</ol>
+<pre><code class="language-bash"># openssl req -newkey rsa:2048 -keyout myKey.pem -nodes -x509 -days 365 -out myCert.pem
+</code></pre>
+<ol start="3">
+<li>Ограничить права на приватный ключ:</li>
+</ol>
+<pre><code class="language-bash"># chmod 600 myKey.pem
+</code></pre>
+<ol start="4">
+<li>Добавить в <code>smb.conf</code> (дословно со страницы):</li>
+</ol>
+<pre><code>tls enabled  = yes
+tls keyfile  = tls/myKey.pem
+tls certfile = tls/myCert.pem
+tls cafile   = 
+</code></pre>
+<ol start="5">
+<li>Перезапустить Samba (либо на 4.19+ перечитать сертификаты через <code>smbcontrol</code>, см. ниже).</li>
+</ol>
+<h3>Замена: сертификат от доверенного CA</h3>
+<ol>
+<li>Создать 2048-битный серверный ключ:</li>
+</ol>
+<pre><code class="language-bash"># openssl genrsa -out myKey.pem 2048
+</code></pre>
+<ol start="2">
+<li>Сгенерировать запрос на сертификат (CSR); при запросе <code>Common Name</code> снова указать FQDN контроллера <code>$(hostname -f)</code>:</li>
+</ol>
+<pre><code class="language-bash"># openssl req -new -key myKey.pem -out myCSR.pem
+</code></pre>
+<ol start="3">
+<li>
+<p>Получить у CA доверенный сертификат и положить его в каталог с ключом (в примере — <code>myCert.pem</code>). Если CA требует промежуточные сертификаты, их тоже кладут в тот же каталог (в примере — <code>myIntermediate.pem</code>).</p>
+</li>
+<li>
+<p>Добавить параметры в <code>smb.conf</code> (дословно со страницы; пробел перед <code>.pem</code> — опечатка источника):</p>
+</li>
+</ol>
+<pre><code>tls enabled  = yes
+tls keyfile  = tls/myKey.pem
+tls certfile = tls/myCert.pem
+tls cafile   = tls/myIntermediate .pem  # if not required, set empty
+</code></pre>
+<ol start="5">
+<li>Перезапустить Samba.</li>
+</ol>
+<p>Для версии 4.21 и новее man-страница прямо разрешает класть промежуточные сертификаты в <code>tls certfile</code> — они будут отправлены в TLS-рукопожатии; в man-страницах 4.19/4.20 этот текст отсутствует. Для самоподписанных вариантов проверка выполняется по CA-файлу: страница вики даёт команды <code>openssl verify ... -CAfile</code> и <code>s_client ... -CAfile</code> (см. «Проверка сертификата»).</p>
+<h3>Перезагрузка сертификатов без перезапуска (Samba 4.19+)</h3>
+<p>Release notes 4.19.0, раздел «Samba AD TLS Certificates can be reloaded»: TLS-сертификаты LDAP-сервера AD DC раньше читались только при запуске, поэтому по истечении срока действия требовался перезапуск Samba, прерывающий обслуживание. Теперь их можно перечитать «на лету»:</p>
+<pre><code class="language-bash"> smbcontrol ldap_server reload-certs
+</code></pre>
+<p>Man-страница <code>smbcontrol(1)</code> (сообщение <code>reload-certs</code>): «Instruct the LDAP server of a Samba AD DC to reload the TLS certificates protecting ldaps:// connections. This message can only be sent to <code>ldap_server</code>.» — команда посылается только процессу/цели <code>ldap_server</code>.</p>
+<h3>Ужесточение: <code>ldap server require strong auth</code>, SASL над TLS и channel bindings</h3>
+<ul>
+<li>Опция <code>ldap server require strong auth</code> появилась вместе с исправлением CVE-2016-2112 (уязвимы Samba 3.0.0–4.4.0). Публичные security-релизы — 4.4.2, 4.3.8 и 4.2.11: «4.4.2, 4.3.8 and 4.2.11 have been issued as security releases to correct the defect… Note that Samba 4.4.1, 4.3.7 and 4.2.10 were privately released to vendors, but had a regression». Гайд Updating Samba ведёт отсчёт опции от 4.4.1/4.3.7/4.2.10 — это ветки, где она появилась впервые, но безопасным ориентиром при обновлении считайте исправленные 4.4.2/4.3.8/4.2.11 (подробнее — <a href="%D0%A5%D0%B0%D1%80%D0%B4%D0%B5%D0%BD%D0%B8%D0%BD%D0%B3-Samba-AD-DC.html">Харденинг Samba AD DC</a>, <a href="%D0%9E%D0%B1%D0%BD%D0%BE%D0%B2%D0%BB%D0%B5%D0%BD%D0%B8%D0%B5-Samba.html">Обновление Samba</a>). Тогда значениями были <code>no</code>, <code>allow_sasl_over_tls</code> и <code>yes</code>, по умолчанию <code>yes</code>; до этого LDAP-сервер не умел требовать строгую аутентификацию.</li>
+<li>Страница вики (проверена 13.10.2026; под изменения 4.21 её текст, судя по всему, не обновлён) констатирует: Samba не реализует LDAP channel binding, как того требуют «2020 LDAP channel binding and LDAP signing requirements for Windows»; ещё в 2016 году с CVE-2016-2112 было признано, что при отсутствии криптографической связи между ответом NTLM/Kerberos-токеном и TLS-слоем возможна relay-атака. Samba просто отклоняет такие сессии по умолчанию. Для совместимости есть значение <code>allow_sasl_over_tls</code> (или <code>no</code>), но на странице написано: «Do not set these options». Безопасная альтернатива — шифрование LDAP-слоя средствами NTLM или Kerberos (SASL encryption): оно криптографически привязано к аутентификации, и MITM-релей не может изменить сообщения.</li>
+<li><strong>С версии 4.21</strong> LDAP-сервер поддерживает SASL-binds (kerberos или NTLMSSP) поверх TLS (ldaps или starttls) с корректными TLS channel bindings. Установки, где раньше требовалось <code>ldap server require strong auth = allow_sasl_over_tls</code>, теперь, скорее всего, могут использовать значение по умолчанию <code>yes</code>. Если SASL-binds без корректных channel bindings всё же нужны, следует использовать <code>allow_sasl_without_tls_channel_bindings</code>; значение <code>allow_sasl_over_tls</code> теперь лишь alias этого значения, при каждом старте <code>samba</code> и <code>[samba-tool ]testparm</code> выводится предупреждение, и в будущих версиях alias будет удалён. Это аналог <code>LdapEnforceChannelBinding</code> в ветке <code>HKLM\SYSTEM\CurrentControlSet\Services\NTDS\Parameters</code> на Windows. Все клиентские утилиты, использующие ldaps, также теперь включают корректные channel bindings.</li>
+<li>Man-страница <code>smb.conf(5)</code> (4.21+) сопоставляет значения с Windows: <code>no</code> — <code>LdapEnforceChannelBinding=0</code>; <code>allow_sasl_without_tls_channel_bindings</code> — <code>LdapEnforceChannelBinding=1</code> (простые и SASL-binds без sign/seal поверх TLS, отсутствие channel bindings игнорируется; незашифрованные соединения — только SASL с sign или seal); <code>yes</code> — <code>LdapEnforceChannelBinding=2</code> (только simple binds и SASL-binds с корректными TLS channel bindings поверх TLS; незашифрованные соединения — только SASL с sign или seal).</li>
+<li>Смежное требование 4.19: смена пароля (<code>unicodePwd</code>/<code>userPassword</code>) на AD DC по незашифрованному или только подписанному LDAP-соединению отклоняется — нужна шифрованная LDAP-сессия. Важная оговорка из release notes 4.19: если Samba стоит за TLS-фронтендом или балансировщиком нагрузки, запрос будет считаться открытым текстом.</li>
+<li>Клиенты: в 4.21 параметр <code>client ldap sasl wrapping</code> получил значения <code>starttls</code> (STARTTLS на TCP-порт 389) и <code>ldaps</code> (TLS напрямую на TCP-порт 636); это касается <code>winbindd</code> и <code>net ads</code>, которым LDAP нужен для связи с DC. Для корректной проверки сертификата требуется настроить доверие минимум одним из способов: <code>tls trust system cas</code>, <code>tls ca directories</code> или <code>tls cafile</code>; также важны <code>tls verify peer</code> и <code>tls crlfile</code>.</li>
+</ul>
+<h3>Ограничение TLS-протоколов</h3>
+<p>Параметр <code>tls priority</code> принимает строку приоритетов GnuTLS (описание в GnuTLS Priority-Strings), что позволяет отключать устаревшие шифры/протоколы. GnuTLS сам управляет набором шифров по умолчанию, но SSLv3 в Samba дополнительно отключён. Пример со страницы (предполагает, что библиотека уже отключает SSLv3, а также отключает TLS 1.0 и 1.1):</p>
+<pre><code>tls priority = NORMAL:-VERS-TLS1.0:-VERS-TLS1.1
+</code></pre>
+<h3>Проверка сертификата</h3>
+<p>Просмотреть содержимое сертификата:</p>
+<pre><code class="language-bash"># openssl x509 -in /usr/local/samba/private/tls/myCert.pem -noout -text
+</code></pre>
+<p>Локальная проверка (для самоподписанного сертификата ожидаемо <code>error 18 ... self signed certificate</code>, затем <code>OK</code>):</p>
+<pre><code class="language-bash"># openssl verify /usr/local/samba/private/tls/myCert.pem
+</code></pre>
+<p>Если в <code>smb.conf</code> используется CA-файл — проверка с ним:</p>
+<pre><code class="language-bash"># openssl verify /usr/local/samba/private/tls/myCert.pem -CAfile /path/to/ca-file.pem
+</code></pre>
+<p>Проверка «снаружи» по TCP (порт 636; выход из <code>s_client</code> — <code>[Ctrl]+[C]</code>):</p>
+<pre><code class="language-bash"># openssl s_client -showcerts -connect dc1.samdom.example.com:636
+</code></pre>
+<p>Вариант из источника с CA-файлом (на странице указан <code>localhost:636</code>):</p>
+<pre><code class="language-bash"># openssl s_client -showcerts -connect localhost:636 -CAfile /path/to/ca-file.pem
+</code></pre>
+<p>В выводе <code>s_client</code> для самоподписанного сертификата на странице показан <code>Verify return code: 18 (self signed certificate)</code>.</p>
+<h2>Подводные камни</h2>
+<ul>
+<li>Страница вики требует перезапуска Samba после смены сертификатов — это верно для версий старше 4.19 (в них сертификаты читались только при старте). Начиная с 4.19 используйте <code>smbcontrol ldap_server reload-certs</code> и не прерывайте работу службы.</li>
+<li>Автогенерируемый сертификат живёт 700 дней; по истечении в версиях старше 4.19 потребовался бы перезапуск Samba — планируйте замену на собственный/корпоративный сертификат заранее.</li>
+<li>Приватный ключ не должен быть зашифрован (без passphrase) — и в вики, и в man <code>smb.conf(5)</code>; ключ должен иметь ограниченные права (в примере <code>chmod 600 myKey.pem</code>).</li>
+<li>CN сертификата обязан быть FQDN контроллера (<code>$(hostname -f)</code>), иначе проверка имени у клиентов не пройдёт.</li>
+<li>Промежуточные сертификаты: вики предписывает дописывать их в cert.pem после серверного; в man-страницах 4.19/4.20 о промежуточных сертификатах в <code>tls certfile</code> речи нет — это явно задокументировано только с 4.21.</li>
+<li><code>allow_sasl_over_tls</code> с 4.21 — устаревший alias, вызывающий предупреждение при старте <code>samba</code> и в <code>testparm</code>; используйте <code>yes</code> (или <code>allow_sasl_without_tls_channel_bindings</code>, если иначе нельзя).</li>
+<li><code>tls verify peer = no_check</code> не проверяет сертификат вообще (допускает MITM), а <code>as_strict_as_possible</code> требует настроенного <code>tls crlfile</code> — выбирайте значение осознанно.</li>
+<li><code>tls trust system cas = yes</code> означает доверие абсолютно всем CA, установленным в системе.</li>
+<li>Если Samba AD DC стоит за TLS-фронтендом или балансировщиком, запрос на смену пароля по LDAP считается незашифрованным и отклоняется (release notes 4.19).</li>
+<li>Автогенерация сертификатов пропускается, если существует хотя бы один из трёх файлов (key.pem/cert.pem/ca.pem); при этом в лог пишется <code>TLS autogeneration skipped - some TLS files already exist</code> — «пустые» или частично подложенные файлы не будут догенерированы.</li>
+<li>Включённый системный режим FIPS влияет на размер ключа автогенерируемого сертификата (3072 вместо 4096 бит) и, как отмечают release notes, может ломать другие протоколы Samba.</li>
+</ul>
+<h2>Источники</h2>
+<ul>
+<li>https://wiki.samba.org/index.php/Configuring_LDAP_over_SSL_(LDAPS)_on_a_Samba_AD_DC — основной источник: общие требования (GnuTLS с 4.11, незашифрованный ключ, PEM, промежуточные сертификаты), параметры <code>tls*</code>, автогенерация, замена сертификата, <code>tls priority</code>, SASL over TLS, проверка через <code>openssl</code>; HTML-копия — assets/LDAPS-Сертификаты-AD-DC-1.html.</li>
+<li>https://www.samba.org/samba/docs/current/man-html/smb.conf.5.html — man-страница <code>smb.conf(5)</code> (текущий раздел; версия 4.25.0 на момент проверки): описания и значения по умолчанию <code>tls enabled/keyfile/certfile/cafile/priority/verify peer/crlfile/trust system cas/ca directories</code>, <code>ldap server require strong auth</code>, пути относительно <code>private dir</code>; HTML-копия — assets/LDAPS-Сертификаты-AD-DC-2.html.</li>
+<li>https://www.samba.org/samba/docs/current/man-html/smbcontrol.1.html — man-страница <code>smbcontrol(1)</code>: сообщение <code>reload-certs</code> для <code>ldap_server</code>; HTML-копия — assets/LDAPS-Сертификаты-AD-DC-5.html.</li>
+<li>https://www.samba.org/samba/history/samba-4.19.0.html — release notes 4.19.0: перезагрузка TLS-сертификатов (<code>smbcontrol ldap_server reload-certs</code>) и требование шифрованного соединения для <code>unicodePwd</code>; HTML-копия — assets/LDAPS-Сертификаты-AD-DC-3.html.</li>
+<li>https://www.samba.org/samba/history/samba-4.21.0.html — release notes 4.21.0: поддержка LDAP TLS/SASL channel bindings, новые значения <code>ldap server require strong auth</code>, <code>client ldap sasl wrapping = starttls|ldaps</code> для winbindd/net ads; HTML-копия — assets/LDAPS-Сертификаты-AD-DC-4.html.</li>
+<li>https://www.samba.org/samba/history/samba-4.11.0.html — release notes 4.11.0: требование GnuTLS (контекст утверждения «4.11.0 и новее»); HTML-копия — assets/LDAPS-Сертификаты-AD-DC-6.html.</li>
+<li>https://www.samba.org/samba/security/CVE-2016-2112.html — история появления <code>ldap server require strong auth</code> (значения <code>no</code>, <code>allow_sasl_over_tls</code>, <code>yes</code>; исправленные версии 4.4.2, 4.3.8, 4.2.11); HTML-копия — assets/LDAPS-Сертификаты-AD-DC-7.html.</li>
+<li>https://gitlab.com/samba-team/samba/-/blob/samba-4.19.0/source4/lib/tls/tlscert.c — исходник автогенерации сертификатов: <code>LIFETIME 700*24*60*60</code>, пропуск генерации при наличии файлов, CN = имя хоста, ключ 0600, RSA 4096/3072 (FIPS).</li>
+<li>https://www.samba.org/samba/docs/4.19/man-html/smb.conf.5.html — man-страница 4.19: старые значения <code>ldap server require strong auth</code>, отсутствие текста о промежуточных сертификатах в <code>tls certfile</code>.</li>
+<li>https://www.samba.org/samba/docs/4.21/man-html/smb.conf.5.html — man-страница 4.21: значения <code>allow_sasl_without_tls_channel_bindings</code>, промежуточные сертификаты в <code>tls certfile</code>.</li>
+<li>https://gitlab.com/samba-team/samba/-/blob/samba-4.21.0/docs-xml/smbdotconf/ldap/ldapserverrequirestrongauth.xml — исходный текст описания <code>ldap server require strong auth</code> в теге 4.21.</li>
+</ul>
+<h2>Связанные заметки</h2>
+<ul>
+<li><a href="%D0%9F%D0%BE%D1%80%D1%82%D1%8B-AD-DC.html">Порты AD DC</a></li>
+<li><a href="%D0%A5%D0%B0%D1%80%D0%B4%D0%B5%D0%BD%D0%B8%D0%BD%D0%B3-Samba-AD-DC.html">Харденинг Samba AD DC</a></li>
+<li><a href="%D0%94%D0%B8%D0%B0%D0%B3%D0%BD%D0%BE%D1%81%D1%82%D0%B8%D0%BA%D0%B0-AD-DC.html">Диагностика AD DC</a></li>
+<li><a href="%D0%A1%D0%B5%D1%80%D1%82%D0%B8%D1%84%D0%B8%D0%BA%D0%B0%D1%82%D0%BD%D1%8B%D0%B9-%D0%92%D1%85%D0%BE%D0%B4-PKINIT-KeyTrust.html">Сертификатный Вход PKINIT KeyTrust</a></li>
+<li><a href="%D0%A3%D1%81%D1%82%D0%B0%D0%BD%D0%BE%D0%B2%D0%BA%D0%B0-Samba-AD-DC.html">Установка Samba AD DC</a></li>
+</ul>
+</main>
+</body>
+</html>

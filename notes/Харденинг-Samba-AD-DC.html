@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Харденинг Samba AD DC</title>
+<link rel="stylesheet" href="../style.css">
+</head>
+<body>
+<nav><a href="../index.html">База знаний Samba AD DC</a></nav>
+<main><h1>Харденинг Samba AD DC</h1>
+<h2>Суть</h2>
+<p>Страница вики «Hardening Samba as an AD DC» — готовый чек-лист усиления контроллера домена: какие параметры <code>smb.conf</code> нельзя ослаблять, какие стоит включить (по умолчанию они выключены), что делать на самом хосте (AppArmor/SELinux, замена автогенерируемого TLS-сертификата), как защитить секреты на диске и какие общедоменные настройки (LDAP-политики, Protected Users, парольные политики) стоит пересмотреть. Авторы подчёркивают: список не исчерпывающий, а «значения по умолчанию» некоторых опций исторически слабее, чем хотелось бы. Последняя правка страницы по данным API вики — 3 декабря 2025 (Bjacke, правка раздела <code>ntlm auth</code>).</p>
+<p>При сверке с актуальным <code>smb.conf(5)</code> и release notes обнаруживаются расхождения в названиях параметров и в описании «будущих» возможностей — они вынесены в «Подводные камни», потому что на них легко ошибиться при копировании конфига из вики.</p>
+<h2>Ключевое</h2>
+<h3>Аудит-логи</h3>
+<ul>
+<li>Страница: аудит-логи AD DC настраиваются параметром <code>log level</code> и на усиленной установке должны обрабатываться системой анализа логов. Подробности настройки и форматы (обычный и JSON) — в <a href="%D0%90%D1%83%D0%B4%D0%B8%D1%82-%D0%B8-JSON-%D0%BB%D0%BE%D0%B3%D0%B8-Samba.html">Аудит и JSON логи Samba</a>.</li>
+<li>Далее по странице есть отдельная секция про парольные политики (см. ниже): lockout по умолчанию выключен, минимальная длина пароля мала.</li>
+</ul>
+<h3><code>ldap server require strong auth</code></h3>
+<ul>
+<li>
+<p>Причина появления опции — атаки на LDAP, известные как NTLM forwarding или «pass the hash». Если параметр выставлен в <code>no</code> или <code>allow_sasl_over_tls</code>, аутентификация привилегированного пользователя или компьютера к SMB-серверу может быть перенаправлена на LDAP-сервер, что позволяет имперсонацию. Усиленная установка сохраняет значение по умолчанию — <code>yes</code>.</p>
+</li>
+<li>
+<p>Цитата со страницы: «It is more secure to use Kerberos with Kerberos encryption directly».</p>
+</li>
+<li>
+<p><code>smb.conf(5)</code> (текущая версия, 4.25): возможные значения — <code>no</code>, <code>allow_sasl_without_tls_channel_bindings</code>, <code>yes</code>, по умолчанию <code>yes</code>. Значения сопоставлены с Windows-параметром <code>LdapEnforceChannelBinding</code> в <code>HKLM\SYSTEM\CurrentControlSet\Services\NTDS\Parameters\</code>: <code>no</code> = 0, <code>allow_sasl_without_tls_channel_bindings</code> = 1, <code>yes</code> = 2.</p>
+</li>
+<li>
+<p><code>allow_sasl_over_tls</code> в текущем мануале — «just an alias of <code>allow_sasl_without_tls_channel_bindings</code>, but it will be removed in future versions»; конфигурации советуют переводить на <code>yes</code> или (если действительно нужно) на <code>allow_sasl_without_tls_channel_bindings</code>.</p>
+</li>
+<li>
+<p>История: опция <code>ldap server require strong auth</code> появилась вместе с исправлением CVE-2016-2112 в ветках 4.4.1 / 4.3.7 / 4.2.10 со значением по умолчанию <code>yes</code>. Эти сборки были «privately released to vendors, but had a regression», поэтому публичными security-релизами стали 4.4.2 / 4.3.8 / 4.2.11 (advisory CVE-2016-2112), а Updating Samba по-прежнему отсчитывает появление опции от 4.4.1/4.3.7/4.2.10 — при обновлении ориентируйтесь на исправленную тройку (подробнее — <a href="LDAPS-%D0%A1%D0%B5%D1%80%D1%82%D0%B8%D1%84%D0%B8%D0%BA%D0%B0%D1%82%D1%8B-AD-DC.html">LDAPS Сертификаты AD DC</a> и <a href="%D0%9E%D0%B1%D0%BD%D0%BE%D0%B2%D0%BB%D0%B5%D0%BD%D0%B8%D0%B5-Samba.html">Обновление Samba</a>, где разобраны те же версии). Приложения, ходящие в AD по LDAP без TLS, получают ошибку:</p>
+<pre><code>ldap_bind: Strong(er) authentication required (8)
+       additional info: BindSimple: Transport encryption required.
+</code></pre>
+</li>
+<li>
+<p>Что изменилось в 4.21 (release notes): сервер LDAP теперь поддерживает SASL-binds (kerberos или NTLMSSP) поверх TLS (ldaps или starttls) с корректными TLS channel bindings. Установки, где раньше требовалось <code>ldap server require strong auth = allow_sasl_over_tls</code>, «can now most likely move to the default of <code>ldap server require strong auth = yes</code>». Если SASL-binds без корректных channel bindings всё же нужны — используйте <code>allow_sasl_without_tls_channel_bindings</code>; значение <code>allow_sasl_over_tls</code> «will generate a warning in every start of 'samba', as well as '[samba-tool ]testparm'».</p>
+</li>
+</ul>
+<h3><code>ntlm auth</code></h3>
+<ul>
+<li>Страница: NTLM — «56-bit encryption at best and compromised badly for well-known word lists». С точки зрения пассивного атакующего <code>no</code> (оно же <code>ntlmv2-only</code>) и значение для MSCHAPv2 одинаково небезопасны, потому что криптография одна и та же; MSCHAPv2 оставлен, так как его труднее устранить, он не предъявляется на административных интерфейсах и может быть защищён TLS-туннелем.</li>
+<li>Для полностью усиленной установки страница предписывает: <code>disabled</code> — требуются только Kerberos или simple-bind, поскольку «even NTLMv2 is quite poor security in 2023».</li>
+<li><code>smb.conf(5)</code>: значения <code>ntlmv1-permitted</code> (alias <code>yes</code>), <code>ntlmv2-only</code> (alias <code>no</code>), <code>mschapv2-and-ntlmv2-only</code>, <code>disabled</code>; по умолчанию <code>ntlm auth = ntlmv2-only</code>. При <code>disabled</code> не принимаются ни NTLM, ни LanMan, ни смена паролей по NTLM.</li>
+<li>Предупреждение мануала (важно для DC): и Microsoft Windows, и Samba RODC преобразуют простой текстовый LDAP Simple Bind в аутентификацию NTLMv2, которую пересылают на полный DC, поэтому <code>disabled</code> сломает такие пересылаемые аутентификации. Кроме того: «these settings apply only to local users… To control NTLM authentication for domain users, this option must be configured on each DC».</li>
+</ul>
+<h3><code>lanman auth</code></h3>
+<ul>
+<li>Страница: Samba 4.17 удалила LanMan-аутентификацию; если у вас Samba 4.16 и старше — убедитесь, что <code>lanman auth</code> остался в значении по умолчанию <code>no</code>.</li>
+<li>Release notes 4.17 подтверждают: «The storage and authentication with LanMan passwords has been entirely removed from the Samba AD DC, even when 'lanman auth = yes' is set». В текущем <code>smb.conf(5)</code> параметр помечен устаревшим с Samba 4.13.</li>
+</ul>
+<h3><code>nt hash store</code> — в вики он назван «allow store nt hash»</h3>
+<ul>
+<li>Страница вики называет опцию <strong><code>allow store nt hash</code></strong> и пишет, что Samba 4.17 получила эту опцию, позволяющую не хранить NT-хеш. В актуальном <code>smb.conf(5)</code> параметра <code>allow store nt hash</code> нет вовсе — параметр называется <strong><code>nt hash store</code></strong> (это же имя в таблице изменений release notes 4.17: «nt hash store — New parameter — always»).</li>
+<li>Возможные значения (<code>smb.conf(5)</code>): <code>always</code> (значение по умолчанию), <code>never</code> (не хранить NT-хеш для пользовательских аккаунтов, только для машинных), <code>auto</code> (хранить, если <code>ntlm auth</code> не выставлен в <code>disabled</code>). Харденинг по вики: <code>never</code>.</li>
+<li>Зачем: NT-хеш <strong>не засолен</strong> и требуется для аутентификации NTLM, NTLMv2, MSCHAPv2 и для Kerberos-типа <code>arcfour-hmac-md5</code>; цель опции — не хранить хеш, который не будет использоваться, поскольку он представляет уязвимость при утечке базы.</li>
+<li>Последствия отключения (мануал и release notes 4.17): для новых и изменённых аккаунтов NT-хеш не хранится в <code>sam.ldb</code> (кроме trust-аккаунтов — компьютеров, DC и межлесных доверий); тип ключа <code>arcfour-hmac-md5</code> в KDC для этих пользователей недоступен (современные клиенты выберут AES). История паролей в AD хранится как NT-хеш, поэтому применяется обходной путь через Kerberos-хеши: хранятся текущий, предыдущий и предпредыдущий пароли (то есть история длиной 3). Так как эти значения засолены, смена <code>sAMAccountName</code>, <code>userAccountControl</code> или <code>userPrincipalName</code> меняет соль — после редкого совпадения переименования и смены пароля для истории будет распознан только текущий пароль.</li>
+<li>Значение по умолчанию проверено по исходникам тега 4.25.0: <code>source3/param/loadparm.c:731</code> — <code>Globals.nt_hash_store = NT_HASH_STORE_ALWAYS;</code>; <code>docs-xml/smbdotconf/security/nt_hash_store.xml</code> — <code>&lt;value type=&quot;default&quot;&gt;always&lt;/value&gt;</code>.</li>
+</ul>
+<h3>Протоколы SMB: <code>server min protocol</code>, <code>client min protocol</code>, <code>client ipc min protocol</code></h3>
+<ul>
+<li>Страница: современные версии Samba по умолчанию используют SMB2 и выше; усиленная установка <strong>не должна</strong> выставлять эти параметры в значения вроде <code>NT1</code>, включающие поддержку SMB1. Отказ от SMB1 убирает поддержку NTLMv2 без NTLMSSP (менее безопасна, чем NTLMv2 внутри NTLMSSP, например в SMB2) и большой объём старого C-кода Samba; протоколы подписи сообщений (integrity protection) в SMB2 существенно лучше.</li>
+<li>Значение по умолчанию в <code>smb.conf(5)</code>: <code>server min protocol = SMB2_02</code>.</li>
+</ul>
+<h3><code>smb1 unix extensions</code>, <code>unix extensions</code></h3>
+<ul>
+<li>Актуально, только если включён SMB1. Символические ссылки SMB1 unix extensions позволяют создать на сервере ссылку в выбранное пользователем место; работа по защите от последования таких ссылок завершена, но лучше вообще не разрешать создание таких симлинков. Усиленная установка сохраняет значение по умолчанию <code>no</code>.</li>
+</ul>
+<h3>NETLOGON secure channel (schannel)</h3>
+<ul>
+<li>Значения по умолчанию этих опций менять не следует (перечислены на странице): <code>allow nt4 crypto = no</code>, <code>reject md5 clients = yes</code>, <code>server schannel require seal = yes</code>, <code>server schannel = yes</code>.</li>
+<li>Если конкретным клиентским хостам нужна устаревшая криптография NETLOGON, страница отсылает к <code>smb.conf(5)</code> за персональными переопределениями. Мануал прямо предупреждает: все эти опции устарели и в будущем будут удалены, а их ослабление — проблема безопасности. Вместо глобальных значений используйте исключения по компьютерным аккаунтам (имя — <code>sAMAccountName</code> с завершающим <code>$</code>):
+<ul>
+<li><code>server require schannel:COMPUTERACCOUNT = no</code> (вместо <code>server schannel = auto</code>),</li>
+<li><code>server schannel require seal:COMPUTERACCOUNT = no</code>,</li>
+<li><code>allow nt4 crypto:COMPUTERACCOUNT = yes</code>,</li>
+<li><code>server reject md5 schannel:COMPUTERACCOUNT = no</code>.</li>
+</ul>
+</li>
+<li>Ссылки в мануале: CVE-2020-1472 (ZeroLogon) и CVE-2022-38023. Дополнительно: <code>reject md5 clients</code> отклоняет клиентов без <code>NETLOGON_NEG_SUPPORTS_AES</code> (появился в Windows 7/Server 2008R2, в Samba с 4.0), а <code>allow nt4 crypto</code> управляет использованием 64-битных ключей; значение по умолчанию у <code>reject md5 clients</code> изменено с <code>no</code> на <code>yes</code> патчами CVE-2022-38023.</li>
+</ul>
+<h3><code>tls priority</code> и GnuTLS</h3>
+<ul>
+<li>
+<p>Samba может передать криптопровайдеру GnuTLS строку приоритетов, описывающую, какие TLS-протоколы поддерживать, а какие — нет; допустимые строки — в GnuTLS Priority-Strings. Опция <code>tls priority</code> полезна, чтобы отключить недавно ставший уязвимым TLS-протокол. Значение по умолчанию в Samba (и в современном GnuTLS) гарантирует, что SSLv3 отключён: <code>tls priority = NORMAL:-VERS-SSL3.0</code> (значение дописывается к списку приоритетов GnuTLS по умолчанию).</p>
+</li>
+<li>
+<p>Пример со страницы LDAPS (отключает дополнительно TLS 1.0 и 1.1):</p>
+<pre><code>tls priority = NORMAL:-VERS-TLS1.0:-VERS-TLS1.1
+</code></pre>
+</li>
+</ul>
+<h3>Замена автогенерируемого TLS-сертификата</h3>
+<ul>
+<li>Страница: Samba автоматически генерирует TLS-сертификат для службы LDAP; его следует заменить на корректно подписанный сертификат, которому доверяют и который проверяют клиенты организации. Расположением файлов управляют параметры <code>tls cafile</code>, <code>tls certfile</code>, <code>tls crlfile</code>, <code>tls dh params file</code>, <code>tls keyfile</code>. По состоянию на страницу: «Currently Samba will need to be restarted when these files are updated».</li>
+<li>Практические детали (имена файлов, 700 дней жизни автогенерируемого сертификата, права <code>0600</code>, PEM-формат, CN = FQDN DC, команды <code>openssl</code>, перезагрузка сертификатов на 4.19+ через <code>smbcontrol ldap_server reload-certs</code>) разобраны в <a href="LDAPS-%D0%A1%D0%B5%D1%80%D1%82%D0%B8%D1%84%D0%B8%D0%BA%D0%B0%D1%82%D1%8B-AD-DC.html">LDAPS Сертификаты AD DC</a>.</li>
+<li>4.19.0 release notes: TLS-сертификаты AD DC LDAP-сервера раньше читались только при запуске, теперь их можно перезагружать «на лету» командой <code>smbcontrol ldap_server reload-certs</code> — то есть утверждение страницы про обязательный рестарт устарело для 4.19 и новее.</li>
+</ul>
+<h3>Шифрование секретов на диске (encryption at rest)</h3>
+<ul>
+<li>AD DC Samba поддерживает шифрование «на диске» паролей и других секретных значений (для фиксированного списка атрибутов). Чтобы воспользоваться этим полностью, нужны два шага усиления и управление ключом.</li>
+<li><code>--plaintext-secrets</code> в <code>samba-tool domain provision</code> или <code>samba-tool domain join</code> задавать нельзя. По умолчанию шифрование включено; даже без управления ключом оно устраняет ряд атак на базу через память, разделяя ключ и зашифрованные данные.</li>
+<li>Список атрибутов из release notes 4.8 (когда появилось шифрование): <code>pekList</code>, <code>msDS-ExecuteScriptPassword</code>, <code>currentValue</code>, <code>dBCSPwd</code>, <code>initialAuthIncoming</code>, <code>initialAuthOutgoing</code>, <code>lmPwdHistory</code>, <code>ntPwdHistory</code>, <code>priorValue</code>, <code>supplementalCredentials</code>, <code>trustAuthIncoming</code>, <code>trustAuthOutgoing</code>, <code>unicodePwd</code>, <code>clearTextPassword</code>. Шифрование включено по умолчанию при новом provision или join и может быть отключено при provision/join опцией <code>--plaintext-secrets</code>; «However, an in-place upgrade will not encrypt the database».</li>
+<li>Убедитесь, что <code>sam.ldb</code> создана на Samba 4.8 или новее: база AD DC, непрерывно обновлявшаяся «на месте» с более старой версии, не получит эту возможность и продолжит писать секреты в <code>sam.ldb</code> в открытом виде. Правильный путь — присоединить к домену новый DC на современной Samba, а исторически «до-4.8» DC понизить (см. <a href="%D0%9F%D1%80%D0%B8%D1%81%D0%BE%D0%B5%D0%B4%D0%B8%D0%BD%D0%B5%D0%BD%D0%B8%D0%B5-%D0%B2%D1%82%D0%BE%D1%80%D0%BE%D0%B3%D0%BE-DC-%D0%BA-%D0%B4%D0%BE%D0%BC%D0%B5%D0%BD%D1%83.html">Присоединение второго DC к домену</a>, <a href="%D0%9F%D0%BE%D0%BD%D0%B8%D0%B6%D0%B5%D0%BD%D0%B8%D0%B5-%D1%80%D0%BE%D0%BB%D0%B8-AD-DC.html">Понижение роли AD DC</a>).</li>
+<li>Ключ <code>private/encrypted_secrets.key</code>: Samba не пытается управлять им. Усиленный DC может подавать этот файл Samba при старте — например, с рамдиска, получив ключ из хранилища секретов. Страница честно предупреждает, что это лишь частичное решение: в <code>private/</code> есть и другие секретные файлы (<code>secrets.keytab</code>, host-пароли в <code>secrets.tdb</code> и <code>secrets.ldb</code>), для которых специальной инженерной работы не делалось.</li>
+</ul>
+<h3>Харденинг хоста: AppArmor и SELinux</h3>
+<ul>
+<li>Samba в некоторых дистрибутивах идёт с обширным набором правил AppArmor (замечено в openSUSE/SUSE) или SELinux (Fedora, RHEL), ограничивающих доступ Samba только к нужным частям файловой системы. Отключать эти правила не следует. Команда Samba не сопровождает такие методы харденинга, но рекомендует использовать пакеты, где они подготовлены и протестированы.</li>
+<li>Подробнее — в <a href="SELinux-%D0%B8-AppArmor-%D0%B4%D0%BB%D1%8F-Samba-AD-DC.html">SELinux и AppArmor для Samba AD DC</a>.</li>
+</ul>
+<h3>Харденинг сборки</h3>
+<ul>
+<li>Система сборки Samba и многих пакетов Samba закаляет код против части атак на C-код. Подробности — в разделе «Hardening practices» страницы Samba Security Documentation: используются опции безопасности компилятора, статический анализ, ограничение прав на чувствительные файлы, меры против переполнения буфера; Debian собирает с <code>DEB_BUILD_MAINT_OPTIONS = hardening=+all</code>, Fedora — со стандартным hardening (кроме <code>-Wl,-z,defs</code>). Samba никогда не нуждается в исполняемом стеке или куче.</li>
+<li>Там же: все файлы Samba с ключами защищены ограничительными правами — для AD-операций Samba работает от <code>root</code>, файлы имеют режим <code>0600</code> и владельца <code>root</code>, а приватные файлы лежат в подкаталоге (в тексте — <code>privat/</code>, опечатка источника) с режимом <code>0700</code>.</li>
+</ul>
+<h3><code>lDAPAdminLimits</code> MaxQueryDuration</h3>
+<ul>
+<li>Страница: Samba соблюдает [MS-ADTS] <code>lDAPAdminLimits</code> <code>MaxQueryDuration</code>, но значение по умолчанию — 120 секунд. Это очень много: worker, обрабатывающий такой запрос, всё это время не обрабатывает другие запросы. Значение стоит понизить. Запросы длительностью более 25 % от максимума логируются на уровне <code>log level = 3</code>.</li>
+<li>Спецификация Microsoft подтверждает: политики задаются атрибутом <code>lDAPAdminLimits</code> (мультизначная строка, где имя и значение разделены <code>=</code>, — пример из спецификации: <code>MaxActiveQueries=0</code>), значение по умолчанию <code>MaxQueryDuration</code> — 120 секунд; при достижении лимита DC возвращает <code>timeLimitExceeded</code>.</li>
+<li>Готовой команды для смены этого значения в проверенных источниках нет — страница вики её не приводит.</li>
+</ul>
+<h3>Protected Users</h3>
+<ul>
+<li>
+<p>Protected Users (реализовано в Samba 4.17 и новее) не могут использовать NTLM, ограничены в делегировании Kerberos (когда один сервер действует от имени пользователя на другом) и имеют укороченное время жизни тикетов. Windows-клиенты также распознают защищённых пользователей и применяют локальные защиты для этих аккаунтов.</p>
+</li>
+<li>
+<p>Из release notes 4.17 — конкретные защиты для аккаунтов в группе: NTLM-аутентификация отключена; TGT, зашифрованные RC4, не выдаются и не принимаются (тикеты с AES и сервисные тикеты с RC4 не затронуты); время жизни TGT ограничено четырьмя часами; ограниченное и неограниченное делегирование Kerberos отключено. Защиты предназначены только для пользовательских аккаунтов — сервисные и компьютерные аккаунты в группу добавлять не следует.</p>
+</li>
+<li>
+<p>Группа идентифицируется в домене RID 525, поэтому создавать её нужно только через <code>samba-tool</code> со специальным параметром:</p>
+<pre><code>samba-tool group add 'Protected Users' --special
+</code></pre>
+<p>Для удалённого сервера в release notes приведён вариант <code>samba-tool group add 'Protected Users' --special -H ldap://dc1.example.com -U Administrator</code>.</p>
+</li>
+</ul>
+<h3>Парольные политики и <code>check password script</code></h3>
+<ul>
+<li>
+<p>Samba поддерживает доменные и гранулярные (Fine-Grained) парольные политики / Password Setting Objects (PSO). Доменные политики можно задавать через GPO, если установлено <code>apply group policies = yes</code> (значение по умолчанию — <code>no</code>), но прямой метод — правка значений в LDAP или <code>samba-tool domain passwordsettings</code>. Гранулярные — через <code>samba-tool domain passwordsettings pso</code> (подкоманды <code>create</code>, <code>set</code>, <code>list</code>, <code>show</code>, <code>apply</code>, <code>unapply</code>, <code>delete</code>, <code>show-user</code>).</p>
+</li>
+<li>
+<p>Значения по умолчанию в Samba (таблица со страницы): сложность пароля — on; хранение открытых паролей — off; длина истории — 24; минимальная длина — 7; минимальный возраст — 1 день; максимальный возраст — 42 дня; блокировка аккаунта — 30 минут; порог блокировки — 0 (никогда); сброс счётчика попыток — 30 минут. Значения совпадают с Windows, но в усиленном домене их следует ужесточить: обязательно включить блокировку (порог <code>0</code> → ненулевой) и заметно увеличить минимальную длину пароля.</p>
+</li>
+<li>
+<p><code>check password script</code> — путь к программе проверки сложности пароля: пароль подаётся ей на стандартный вход, программа должна вернуть <code>0</code> для хорошего пароля и любое другое значение для плохого (иначе смена пароля не состоится). На AD DC скрипт запускается <strong>от root</strong> («In Samba AD, this script will be run AS ROOT by samba(8) without any substitutions»). Начиная с Samba 4.11 скрипту экспортируются переменные <code>SAMBA_CPS_ACCOUNT_NAME</code> (всегда), <code>SAMBA_CPS_USER_PRINCIPAL_NAME</code> и <code>SAMBA_CPS_FULL_NAME</code> (если есть). В каталоге примеров есть программа <code>crackcheck</code>, использующая cracklib:</p>
+<pre><code>check password script = /usr/local/sbin/crackcheck
+</code></pre>
+<p>Страница вики замечает, что cracklib, который использует <code>crackcheck</code>, устарел — его вытеснили инструменты, проверяющие большие базы утечек паролей.</p>
+</li>
+</ul>
+<h3>Небезопасные обновления DNS</h3>
+<ul>
+<li>Samba можно настроить так, чтобы неаутентифицированные клиенты обновляли записи динамического DNS. Значение по умолчанию <code>allow dns updates = secure only</code> и его следует сохранять (возможные значения: <code>disabled</code>, <code>secure only</code>, <code>nonsecure</code>).</li>
+</ul>
+<h3>Шифрование Kerberos: AES по умолчанию в 4.24/4.25 (CVE-2026-20833)</h3>
+<ul>
+<li>
+<p>Release notes 4.24.0 и 4.25.0 (в вики и в официальных notes) заявляют одно и то же: значение по умолчанию параметра <code>kdc default domain supported enctypes</code> теперь соответствует <code>aes128-cts-hmac-sha1-96 aes256-cts-hmac-sha1-96</code> (оба типа шифрования AES), если функциональный уровень домена 2008 или выше. Указанная причина — CVE-2026-20833.</p>
+</li>
+<li>
+<p>В таблице изменений <code>smb.conf</code> у 4.24.0 и 4.25.0: <code>kdc default domain supported enctypes</code> — «New default» — «AES encryption types (if supported by domain)».</p>
+</li>
+<li>
+<p><code>smb.conf(5)</code> объясняет значение по умолчанию <code>0</code>: это «maps to what the software supports currently» — AES-типы, если ключи AES доступны (функциональный уровень домена 2008+), иначе <code>arcfour-hmac-md5 aes256-cts-hmac-sha1-96-sk</code>. Параметр задаёт значение <code>msDS-SupportedEncryptionTypes</code> для сервисных аккаунтов, у которых атрибут отсутствует или равен 0 (аналог ветки реестра <code>HKLM\System\CurrentControlSet\services\KDC\DefaultDomainSupportedEncTypes</code> в Windows).</p>
+</li>
+<li>
+<p>Смежная опция <code>kdc force enable rc4 weak session keys</code> (по умолчанию <code>no</code>) позволяет KDC считать, что rc4-hmac сессионный ключ может использоваться по запросу потенциально старого клиента, независимо от <code>msDS-SupportedEncryptionTypes</code>.</p>
+</li>
+<li>
+<p>Рекомендованная конфигурация KDC из release notes 4.24:</p>
+<pre><code>strong certificate binding enforcement                            full
+kdc always include pac                                            yes
+kdc require canonicalization                                      yes
+</code></pre>
+<p>Если <code>kdc require canonicalization = yes</code> использовать нельзя, в notes советуют по возможности выставить <code>kdc name match implicit dollar without implicit canonicalization = no</code>.</p>
+</li>
+</ul>
+<h2>Подводные камни</h2>
+<ul>
+<li><strong>Название параметра в вики не совпадает с настоящим.</strong> Страница называет опцию <code>allow store nt hash</code>, тогда как в <code>smb.conf(5)</code> и в release notes 4.17 она называется <code>nt hash store</code> (значения <code>always</code> / <code>never</code> / <code>auto</code>). Параметра <code>allow store nt hash</code> в текущем мануале нет вовсе — проверяйте итоговый конфиг через <code>testparm</code>.</li>
+<li><strong>В мануале описания <code>nt hash store</code> расходятся.</strong> В разделе про <code>ntlm auth</code> тот же <code>smb.conf(5)</code> называет значением по умолчанию <code>auto</code>, а в конце описания <code>nt hash store</code> стоит <code>Default: nt hash store = always</code>; в исходниках тега 4.25.0 зашито <code>NT_HASH_STORE_ALWAYS</code> (<code>source3/param/loadparm.c:731</code>). Ориентируйтесь на <code>always</code> как на фактическое умолчание.</li>
+<li><strong>Значение <code>allow-mschapv2</code> из вики в мануале отсутствует.</strong> Для <code>ntlm auth</code> текущий <code>smb.conf(5)</code> перечисляет <code>ntlmv1-permitted</code> (alias <code>yes</code>), <code>ntlmv2-only</code> (alias <code>no</code>), <code>mschapv2-and-ntlmv2-only</code>, <code>disabled</code> — значения <code>allow-mschapv2</code> в списке нет.</li>
+<li><strong><code>nt hash store = never</code> ломает часть сценариев</strong>: история паролей сокращается до трёх значений, а после переименования аккаунта вместе со сменой пароля распознаётся только текущий пароль; из-за отсутствия NT-хеша недоступен Kerberos-тип <code>arcfour-hmac-md5</code>, то есть клиенты, умеющие только RC4, перестанут проходить аутентификацию. Trust-аккаунты (компьютеры, DC, межлесные доверия) NT-хеш всё равно сохраняют.</li>
+<li><strong><code>ntlm auth = disabled</code> на DC ломает пересылаемый NTLM.</strong> Windows и Samba RODC преобразуют текстовый LDAP Simple Bind в NTLMv2, который пересылают на полный DC, — при <code>disabled</code> такие аутентификации будут отклонены (предупреждение <code>smb.conf(5)</code>).</li>
+<li><strong>Раздел «Future possible hardening» на странице устарел.</strong> Вики утверждает, что Samba не выставляет channel bindings как клиент и не проверяет их как сервер «at this time», и что новая опция может появиться в будущем. На самом деле поддержка SASL over TLS с корректными TLS channel bindings появилась в 4.21 (release notes), а текущий <code>smb.conf(5)</code> описывает значения <code>ldap server require strong auth</code> именно в терминах channel bindings.</li>
+<li><strong>Вики-страница «Configuring LDAP over SSL (LDAPS) on a Samba AD DC» тоже отстала от 4.21</strong> (это вики-источник заметки <a href="LDAPS-%D0%A1%D0%B5%D1%80%D1%82%D0%B8%D1%84%D0%B8%D0%BA%D0%B0%D1%82%D1%8B-AD-DC.html">LDAPS Сертификаты AD DC</a>, а не сама заметка): она описывает <code>allow_sasl_over_tls</code> без упоминания, что с 4.21 это лишь alias, вызывающий предупреждение при каждом старте <code>samba</code> и в <code>testparm</code> (и подлежащий удалению).</li>
+<li><strong>Опции NETLOGON намеренно устаревают.</strong> <code>allow nt4 crypto</code>, <code>reject md5 clients</code>, <code>server schannel</code>, <code>server schannel require seal</code> помечены в мануале как deprecated и будут удалены; вместо ослабления этих глобальных значений для старых клиентов используйте персональные исключения по <code>COMPUTERACCOUNT</code> (см. выше).</li>
+<li><strong>Шифрование секретов не лечится in-place обновлением.</strong> База, обновлявшаяся с версии до 4.8, продолжит писать секреты в открытом виде; нужен новый DC (provision/join на современной версии) и понижение старого. Ключ <code>private/encrypted_secrets.key</code> Samba не администрирует, и даже вынос его в хранилище — лишь частичное решение: <code>secrets.keytab</code> и host-пароли в <code>secrets.tdb</code>/<code>secrets.ldb</code> остаются неуправляемыми.</li>
+<li><strong><code>--plaintext-secrets</code> отключает свойство защиты.</strong> Опция предназначена для отказа от шифрования секретов при provision/join; на усиленной установке её быть не должно.</li>
+<li><strong><code>check password script</code> выполняется от root на AD DC.</strong> Скрипт получает пароль на stdin и должен возвращать 0 для хорошего пароля. Отдельная сложность с подстановкой <code>%u</code> — это CVE-2026-4408 (RCE на файловых серверах и классических DC с <code>samba-dcerpcd</code> в системной службе); AD DC не затронуты, так как не раскрывают имя пользователя через <code>%u</code>, но скрипт по-прежнему исполняется с правами root.</li>
+<li><strong>Максимальный возраст пароля: 42 или 43 дня.</strong> Свежесозданный домен Samba получает <code>maxPwdAge: -36288000000000</code> (42 дня) из <code>source4/setup/provision_basedn_modify.ldif:36</code>, а <code>samba-tool domain passwordsettings set --max-pwd-age=default</code> выставляет 43 (<code>python/samba/netcmd/domain/passwordsettings.py:228</code>, то же значение в подсказке <code>--help</code>). Сброс «в значение по умолчанию» на день отличается от исходного.</li>
+<li><strong>Понижение <code>MaxQueryDuration</code> не бесплатно</strong>: по достижении лимита DC возвращает ошибку <code>timeLimitExceeded</code>, а долгие запросы (свыше 25 % лимита) начинают попадать в лог на уровне 3. Значение по умолчанию — 120 секунд.</li>
+<li><strong>Доменную парольную политику через GPO применяют только при <code>apply group policies = yes</code></strong> (по умолчанию <code>no</code>); иначе используйте прямой метод (<code>samba-tool domain passwordsettings</code> или LDAP). По умолчанию порог блокировки равен <code>0</code>, то есть блокировки аккаунтов нет вовсе.</li>
+</ul>
+<h2>Источники</h2>
+<ul>
+<li>https://wiki.samba.org/index.php/Hardening_Samba_as_an_AD_DC — основной источник: чек-лист параметров <code>smb.conf</code>, харденинг хоста, шифрование секретов, харденинг сборки, <code>lDAPAdminLimits</code>, Protected Users, парольные политики; HTML-копия — <code>assets/Харденинг-Samba-AD-DC-1.html</code>.</li>
+<li>https://www.samba.org/samba/docs/current/man-html/smb.conf.5.html — man-страница <code>smb.conf(5)</code> текущей стабильной версии (каталог <code>/samba/docs/current/</code> обновлён 2026-09-24, в тот же день вышел 4.25.0): описания, значения и список значений <code>ldap server require strong auth</code>, <code>ntlm auth</code>, <code>nt hash store</code>, <code>server schannel</code>/<code>server schannel require seal</code>/<code>allow nt4 crypto</code>/<code>reject md5 clients</code> и их per-account вариантов, <code>tls priority</code>, <code>check password script</code>, <code>allow dns updates</code>, <code>apply group policies</code>, <code>server min protocol</code>, <code>kdc default domain supported enctypes</code>, <code>kdc force enable rc4 weak session keys</code>; HTML-копия — <code>assets/Харденинг-Samba-AD-DC-2.html</code>.</li>
+<li>https://wiki.samba.org/index.php/Samba_Security_Documentation — раздел «Hardening practices» (опции компилятора, Debian/Fedora, отсутствие нужды в исполняемом стеке), ограничительные права на файлы с ключами (<code>0600</code>/<code>0700</code>), гигиена ключей в памяти, криптографические детали NETLOGON schannel и перечень управляющих им опций; HTML-копия — <code>assets/Харденинг-Samba-AD-DC-3.html</code>.</li>
+<li>https://wiki.samba.org/index.php/Samba_4.21_Features_added/changed — LDAP TLS/SASL channel bindings, новые значения <code>ldap server require strong auth</code>, предупреждение от <code>allow_sasl_over_tls</code>, новые значения <code>client ldap sasl wrapping</code>; HTML-копия — <code>assets/Харденинг-Samba-AD-DC-4.html</code>.</li>
+<li>https://wiki.samba.org/index.php/Samba_4.24_Features_added/changed — раздел «Domain encryption types changed to AES by default» (CVE-2026-20833) и рекомендованная конфигурация KDC; HTML-копия — <code>assets/Харденинг-Samba-AD-DC-5.html</code>.</li>
+<li>https://wiki.samba.org/index.php/Samba_4.25_Features_added/changed — то же изменение AES-умолчания для 4.25 и строка <code>kdc default domain supported enctypes — New default</code> в таблице изменений <code>smb.conf</code>; HTML-копия — <code>assets/Харденинг-Samba-AD-DC-6.html</code>.</li>
+<li>https://www.samba.org/samba/history/samba-4.24.0.html — официальные release notes 4.24.0: текст про AES-умолчание, ссылка на CVE-2026-20833 и полная таблица изменений <code>smb.conf</code>.</li>
+<li>https://www.samba.org/samba/history/samba-4.25.0.html — официальные release notes 4.25.0: подтверждение AES-умолчания и таблица изменений <code>smb.conf</code>.</li>
+<li>https://wiki.samba.org/index.php/Samba_4.8_Features_added/changed — появление шифрования секретов: список атрибутов, включение по умолчанию при provision/join, опция <code>--plaintext-secrets</code>, отсутствие шифрования при in-place обновлении.</li>
+<li>https://wiki.samba.org/index.php/Samba_4.17_Features_added/changed — параметр <code>nt hash store</code> (новый, по умолчанию <code>always</code>), удаление LanMan-аутентификации и хранения LanMan-паролей из AD DC, Protected Users (защиты, RID 525, <code>samba-tool group add 'Protected Users' --special</code>).</li>
+<li>https://www.samba.org/samba/docs/current/man-html/samba-tool.8.html — <code>domain passwordsettings set|show|pso …</code>: значения по умолчанию (сложность on, история 24, минимум 7, возраст 1/43 дня, блокировка 30/0/30) и подкоманды PSO.</li>
+<li>https://wiki.samba.org/index.php/Updating_Samba — раздел «New Default for LDAP Connections Requires Strong Authentication»: появление <code>ldap server require strong auth</code> в 4.4.1/4.3.7/4.2.10 и сообщение об ошибке у LDAP-клиентов без TLS.</li>
+<li>https://wiki.samba.org/index.php/Setting_up_Audit_Logging — аудит-логи AD DC через <code>log level</code> (пример <code>log level = 1 auth_audit:3 auth_json_audit:3</code>).</li>
+<li>https://wiki.samba.org/index.php/Configuring_LDAP_over_SSL_(LDAPS)_on_a_Samba_AD_DC — пример <code>tls priority = NORMAL:-VERS-TLS1.0:-VERS-TLS1.1</code>, параметры <code>tls*</code>, состав автогенерируемых файлов.</li>
+<li>https://www.samba.org/samba/history/samba-4.19.0.html — «Samba AD TLS Certificates can be reloaded»: <code>smbcontrol ldap_server reload-certs</code> (поправка к утверждению вики о необходимости рестарта).</li>
+<li>https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-adts/3f0137a1-63df-400c-bf97-e1040f055a99 — [MS-ADTS] «LDAP Policies»: атрибут <code>lDAPAdminLimits</code>, политика <code>MaxQueryDuration</code> со значением по умолчанию 120 секунд и ошибкой <code>timeLimitExceeded</code>.</li>
+<li>https://www.samba.org/samba/security/CVE-2026-4408.html — advisory о RCE в SAMR при <code>check password script</code> с подстановкой <code>%u</code>; AD DC не затронуты (не раскрывают имя через <code>%u</code>).</li>
+<li>https://cveawg.mitre.org/api/cve/CVE-2026-20833 — запись CVE-2026-20833 (MITRE): «Windows Kerberos Information Disclosure Vulnerability», «Use of a broken or risky cryptographic algorithm in Windows Kerberos»; ссылка на changelog Microsoft.</li>
+<li>https://gitlab.com/samba-team/samba/-/blob/samba-4.25.0/source3/param/loadparm.c#L731 — фактическое умолчание <code>NT_HASH_STORE_ALWAYS</code> в теге 4.25.0.</li>
+<li>https://gitlab.com/samba-team/samba/-/blob/samba-4.25.0/docs-xml/smbdotconf/security/nt_hash_store.xml — исходный текст описания <code>nt hash store</code> и <code>&lt;value type=&quot;default&quot;&gt;always&lt;/value&gt;</code>.</li>
+<li>https://gitlab.com/samba-team/samba/-/blob/samba-4.25.0/source4/setup/provision_basedn_modify.ldif — значения парольной политики при провижининге домена (<code>maxPwdAge</code> 42 дня, <code>minPwdAge</code> 1 день, <code>minPwdLength</code>).</li>
+<li>https://gitlab.com/samba-team/samba/-/blob/samba-4.25.0/python/samba/provision/<strong>init</strong>.py#L136 — <code>DEFAULT_MIN_PWD_LENGTH = 7</code> (значение <code>MIN_PWD_LENGTH</code> для провижининга).</li>
+<li>https://gitlab.com/samba-team/samba/-/blob/samba-4.25.0/python/samba/netcmd/domain/passwordsettings.py#L228 — <code>max_pwd_age = 43</code> при значении <code>default</code> (и подсказка «Default is 43» в <code>--help</code>).</li>
+</ul>
+<h2>Связанные заметки</h2>
+<ul>
+<li><a href="LDAPS-%D0%A1%D0%B5%D1%80%D1%82%D0%B8%D1%84%D0%B8%D0%BA%D0%B0%D1%82%D1%8B-AD-DC.html">LDAPS Сертификаты AD DC</a></li>
+<li><a href="%D0%90%D1%83%D0%B4%D0%B8%D1%82-%D0%B8-JSON-%D0%BB%D0%BE%D0%B3%D0%B8-Samba.html">Аудит и JSON логи Samba</a></li>
+<li><a href="SELinux-%D0%B8-AppArmor-%D0%B4%D0%BB%D1%8F-Samba-AD-DC.html">SELinux и AppArmor для Samba AD DC</a></li>
+<li><a href="%D0%9E%D0%B1%D0%BD%D0%BE%D0%B2%D0%BB%D0%B5%D0%BD%D0%B8%D0%B5-Samba.html">Обновление Samba</a></li>
+<li><a href="%D0%94%D0%B8%D0%B0%D0%B3%D0%BD%D0%BE%D1%81%D1%82%D0%B8%D0%BA%D0%B0-AD-DC.html">Диагностика AD DC</a></li>
+</ul>
+</main>
+</body>
+</html>

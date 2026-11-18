@@ -1,0 +1,271 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Групповые политики (GPO) в Samba AD DC</title>
+<link rel="stylesheet" href="../style.css">
+</head>
+<body>
+<nav><a href="../index.html">База знаний Samba AD DC</a></nav>
+<main><h1>Групповые политики (GPO) в Samba AD DC</h1>
+<h2>Суть</h2>
+<p>Group Policy даёт централизованное управление настройками операционной системы, приложений и пользователей. Политики доставляются клиентам через LDAP: записи <code>groupPolicyContainer</code>, атрибут <code>gPCFileSysPath</code> которых указывает на каталог политики на share SYSVOL (<code>\\&lt;домен&gt;\sysvol\&lt;домен&gt;\Policies\&lt;GUID&gt;</code>). В Samba AD DC GPO можно создавать и редактировать как через Windows-оснастку Group Policy Management (из состава RSAT), так и командой <code>samba-tool gpo</code>; на Linux-членах домена политики применяет <code>samba-gpupdate</code> — при включённой в winbind опции <code>apply group policies = yes</code>.</p>
+<h2>Ключевое</h2>
+<h3>Где хранятся GPO</h3>
+<ul>
+<li>Клиент получает список политик из LDAP, из объектов <code>groupPolicyContainer</code>; каждый объект предоставляет атрибут <code>gPCFileSysPath</code> — путь к информации политики на share SYSVOL домена (wiki: «Policies are delivered to clients by listing them in LDAP, under groupPolicyContainer objects. These objects provide the gPCFileSysPath attribute, which points to policy information stored on the domains SYSVOL share»).</li>
+<li>Каталог GPO на SYSVOL выглядит как <code>\\&lt;realm&gt;\sysvol\&lt;realm&gt;\Policies\{GUID}</code>. Вывод <code>samba-tool gpo listall -UAdministrator</code> (дословно с вики):</li>
+</ul>
+<pre><code>  # samba-tool gpo listall -UAdministrator
+  GPO          : {31B2F340-016D-11D2-945F-00C04FB984F9}
+  display name : Default Domain Policy
+  path         : \\example.com\sysvol\example.com\Policies\{31B2F340-016D-11D2-945F-00C04FB984F9}
+  dn           : CN={31B2F340-016D-11D2-945F-00C04FB984F9},CN=Policies,CN=System,DC=example,DC=com
+  version      : 2097290
+  flags         : NONE
+</code></pre>
+<ul>
+<li>Первый атрибут каждой строки — GUID GPO; он нужен, чтобы идентифицировать политику во всех остальных командах <code>samba-tool gpo</code>.</li>
+<li>Привязка политики к контейнеру (домен, OU, сайт) делается через атрибут <code>gPLink</code>: <code>samba-tool gpo setlink &lt;container_dn&gt; &lt;gpo&gt;</code> (есть опции <code>--disable</code> и <code>--enforce</code>); снять привязку — <code>samba-tool gpo dellink &lt;container_dn&gt; &lt;gpo&gt;</code>, посмотреть привязки контейнера — <code>gpo getlink &lt;container_dn&gt;</code>, найти контейнеры, куда привязана GPO, — <code>gpo listcontainers &lt;gpo&gt;</code>, наследование — <code>gpo getinheritance &lt;container_dn&gt;</code> / <code>gpo setinheritance &lt;container_dn&gt; block|inherit</code>.</li>
+<li>Интервал применения: wiki говорит «случайный интервал между 90 и 120 секундами»; release notes 4.14 и man-страница smb.conf — «каждые 90 минут плюс случайная добавка от 0 до 30 минут». См. «Подводные камни».</li>
+<li>На Windows-члене домена политики применяются автоматически, вручную — <code>gpupdate /force</code>. На Linux-члене — <code>samba-gpupdate --force</code>.</li>
+</ul>
+<h3>Подкоманды samba-tool gpo (по текущей man-странице samba-tool.8)</h3>
+<table>
+<thead>
+<tr>
+<th>Команда</th>
+<th>Назначение</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>gpo listall</code></td>
+<td>список всех GPO</td>
+</tr>
+<tr>
+<td><code>gpo list &lt;username&gt;</code></td>
+<td>GPO, применяемые к учётной записи</td>
+</tr>
+<tr>
+<td><code>gpo show &lt;gpo&gt;</code></td>
+<td>сведения о GPO</td>
+</tr>
+<tr>
+<td><code>gpo create &lt;displayname&gt;</code> / <code>gpo del &lt;gpo&gt;</code></td>
+<td>создать пустую / удалить GPO</td>
+</tr>
+<tr>
+<td><code>gpo setlink</code> / <code>dellink</code> / <code>getlink</code> / <code>listcontainers</code> / <code>getinheritance</code> / <code>setinheritance</code></td>
+<td>работа с привязкой GPO к контейнеру (атрибут <code>gPLink</code>)</td>
+</tr>
+<tr>
+<td><code>gpo fetch &lt;gpo&gt;</code></td>
+<td>скачать GPO с DC (копирует каталог GPO в локальный каталог)</td>
+</tr>
+<tr>
+<td><code>gpo load &lt;gpo&gt;</code></td>
+<td>залить в GPO registry-политики из JSON (stdin или <code>--content</code>); <code>--machine-ext-name</code> / <code>--user-ext-name</code> дописывают значения в <code>gPCMachineExtensionNames</code> / <code>gPCUserExtensionNames</code>, <code>--replace</code> заменяет политики вместо слияния</td>
+</tr>
+<tr>
+<td><code>gpo remove &lt;gpo&gt;</code></td>
+<td>удалить политики из GPO (тот же JSON-формат через stdin или <code>--content</code>)</td>
+</tr>
+<tr>
+<td><code>gpo backup &lt;gpo&gt;</code> / <code>gpo restore &lt;displayname&gt; &lt;backup location&gt;</code></td>
+<td>бэкап и восстановление GPO (см. ниже)</td>
+</tr>
+<tr>
+<td><code>gpo admxload</code></td>
+<td>загрузка ADMX-шаблонов на SYSVOL (см. ниже)</td>
+</tr>
+<tr>
+<td><code>gpo aclcheck</code></td>
+<td>«Check all GPOs have matching LDAP and DS ACLs» — сверка LDAP- и DS-ACL у GPO</td>
+</tr>
+<tr>
+<td><code>gpo manage ...</code></td>
+<td>Linux-политики (см. ниже)</td>
+</tr>
+<tr>
+<td><code>gpo cse list</code> / <code>register &lt;cse_file&gt; &lt;cse_name&gt;</code> / <code>unregister &lt;GUID&gt;</code></td>
+<td>регистрация Client Side Extension на текущем хосте: нужен хотя бы один из флагов <code>--machine</code> или <code>--user</code>; файл CSE должен лежать на постоянном пути — команда его не копирует</td>
+</tr>
+</tbody>
+</table>
+<p>Пример JSON-входа для <code>gpo load</code> (с man-страницы):</p>
+<pre><code>[
+    {
+        &quot;keyname&quot;: &quot;Software\Policies\Mozilla\Firefox\Homepage&quot;,
+        &quot;valuename&quot;: &quot;StartPage&quot;,
+        &quot;class&quot;: &quot;USER&quot;,
+        &quot;type&quot;: &quot;REG_SZ&quot;,
+        &quot;data&quot;: &quot;homepage&quot;
+    }
+]
+</code></pre>
+<p>Допустимые классы: <code>MACHINE|USER|BOTH</code>. Опции <code>--machine-ext-name</code> / <code>--user-ext-name</code> нужны потому, что Windows Group Policy требует корректных GUID клиентских расширений в <code>gPCMachineExtensionNames</code> / <code>gPCUserExtensionNames</code>; Linux-политики этого ограничения не имеют. По умолчанию добавляется <code>{35378EAC-683F-11D2-A89A-00C04FBBCFA2}</code>, включающий большинство registry-политик.</p>
+<h3>Загрузка ADMX-шаблонов</h3>
+<ul>
+<li>Шаблоны Samba загружаются командой:</li>
+</ul>
+<pre><code>$ samba-tool gpo admxload -U Administrator
+</code></pre>
+<p>Команда копирует ADMX Samba в каталог <code>&lt;domain&gt;/Policies/PolicyDefinitions</code> на share SYSVOL. Каталог по умолчанию — <code>${data_dir}/samba/admx</code> (по исходникам команды).</p>
+<ul>
+<li>Важно: установив только шаблоны Samba, нельзя администрировать Windows-члены — обязательно нужны и шаблоны Microsoft (предупреждение на вики).</li>
+<li>При нескольких DC команду запускают с <code>-H</code>, чтобы шаблоны попали на нужный DC: <code>samba-tool gpo admxload -H ldap://dc1.samdom.example.com -U Administrator</code>.</li>
+<li>Шаблоны Microsoft: скачать последние Administrative Templates для своей версии ОС, распаковать <code>msiextract</code> (пакет <code>msitools</code> в Debian/Ubuntu, RHEL/CentOS, Arch AUR) и загрузить (пример вики для Windows 10 22H2):</li>
+</ul>
+<pre><code>$ msiextract /path/to/microsoft/download/Administrative\ Templates\ \(.admx\)\ for\ Windows\ 10\ October\ 2022\ Update.msi
+$ samba-tool gpo admxload -U Administrator --admx-dir=/path/to/extracted/msi/Program\ Files/Microsoft\ Group\ Policy/Windows\ 10\ October\ 2022\ Update\ \(22H2\)/PolicyDefinitions/
+</code></pre>
+<ul>
+<li><code>admxload</code> печатает предупреждение: загрузка в Central Store мешает Windows показывать собственные шаблоны в Group Policy Management Console, пока туда не установлены шаблоны Microsoft.</li>
+<li>Тем же способом (<code>--admx-dir=</code>) ставятся сторонние шаблоны: Mozilla policy-templates, Google Chrome <code>policy_templates</code>.</li>
+</ul>
+<h3>Бэкап, восстановление и перенос GPO между доменами (Samba 4.10+)</h3>
+<ul>
+<li>Порядок из wiki: создать GPO обычными средствами (Windows Group Policy Management) → узнать GUID (например, <code>samba-tool gpo listall</code>) → выполнить бэкап → при необходимости восстановить:</li>
+</ul>
+<pre><code>samba-tool gpo backup &lt;GPO GUID&gt;
+samba-tool gpo restore &lt;new GPO name&gt; &lt;path generated from backup&gt;
+</code></pre>
+<ul>
+<li>Бэкап читает конфигурационные файлы GPO и сохраняет их как обобщённые (generalized) XML-файлы, а также бинарный дубликат на случай, если восстановление из XML не удастся. Файлы можно править руками, но повредить их при этом легко.</li>
+<li>Обобщение для переноса в другой домен (Samba 4.10):</li>
+</ul>
+<pre><code>samba-tool gpo backup --generalize --entities=&lt;output path&gt;
+</code></pre>
+<p>Существуют три типа сущностей (entities): user ID (SID, имена пользователей), ACL (SDDL), share paths (пути <code>\\unc</code>). Пример вывода с вики:</p>
+<pre><code>&lt;!ENTITY SAMBA__NETWORK_PATH__82419dafed126a07d6b96c66fc943735__ &quot;\\realm.com&quot;&gt;
+&lt;!ENTITY SAMBA__NETWORK_PATH__0484cd41ded45a0728333a9c5e5ef619__ &quot;\\test&quot;&gt;
+&lt;!ENTITY SAMBA____SDDL_ACL____4ce8277be3f630300cbcf80a80e21cf4__ &quot;D:PAR(A;CI;KA;;;BA)(A;CIIO;KA;;;CO)(A;CI;KR;;;S-1-0-0)&quot;&gt;
+&lt;!ENTITY SAMBA____USER_ID_____d0970f5a1e19cb803f916c203d5c39c4__ &quot;*S-1-5-21-3075996733-1131693954-1131023892-501&quot;&gt;
+&lt;!ENTITY SAMBA____USER_ID_____7b7bc2512ee1fedcd76bdc68926d4f7b__ &quot;Guest&quot;&gt;
+</code></pre>
+<ul>
+<li>При переносе в другой домен эти entities правят на значения нового домена и восстанавливают командой:</li>
+</ul>
+<pre><code>samba-tool gpo restore --entities=&lt;new entities file&gt;
+</code></pre>
+<ul>
+<li>После восстановления настройки нужно проверять: содержимое GPO можно менять вручную, поэтому применятся они не обязательно так, как ожидается. Опция <code>--restore-metadata</code> сохраняет старый <code>GPT.INI</code> и связанный с ним номер версии (man-страница).</li>
+<li>Генерализация неполная: поддерживается лишь подмножество файлов. Известные непокрытые форматы: aas-файлы (software installation); xml-файлы (preferences, ярлыки); статус admx неизвестен. У Windows-миграционных таблиц, по замечанию страницы, пробелы тоже есть.</li>
+</ul>
+<h3>Применение на Linux-членах домена (Samba 4.14+)</h3>
+<ul>
+<li>winbind: включить на клиенте глобальную опцию <code>apply group policies = yes</code>.</li>
+<li>SSSD: применение политик выполняется через <a href="https://github.com/openSUSE/oddjob-gpupdate">oddjob-gpupdate</a>, при этом <code>samba-gpupdate</code> из Samba должен быть установлен.</li>
+<li>Release notes 4.14: политики применяются «каждые 90 минут, плюс случайная задержка от 0 до 30 минут». Опция smb.conf <code>gpo update command</code> задаёт, какая команда вызывается для применения GPO (по умолчанию <code>${prefix}/sbin/samba-gpupdate</code>); на KDC <code>samba-gpupdate</code> применяет System Access и Kerberos-политики: <code>minPwdAge</code>, <code>maxPwdAge</code>, <code>minPwdLength</code>, <code>pwdProperties</code> в samdb и <code>kdc:service ticket lifetime</code>, <code>kdc:user ticket lifetime</code>, <code>kdc:renewal lifetime</code> в smb.conf. Написания в источниках различаются: man-страница и KDC-код используют форму с пробелами (<code>kdc:user ticket lifetime</code> в smb.conf), а GP-расширение Samba хранит те же значения в GPO-хранилище <code>gpo.tdb</code> под ключами с подчёркиванием (<code>kdc:user_ticket_lifetime</code>); разбор и практический вывод — в <a href="%D0%94%D0%BE%D0%B2%D0%B5%D1%80%D0%B8%D1%82%D0%B5%D0%BB%D1%8C%D0%BD%D1%8B%D0%B5-%D0%BE%D1%82%D0%BD%D0%BE%D1%88%D0%B5%D0%BD%D0%B8%D1%8F-%D0%BC%D0%B5%D0%B6%D0%B4%D1%83-%D0%B4%D0%BE%D0%BC%D0%B5%D0%BD%D0%B0%D0%BC%D0%B8.html">Доверительные отношения между доменами</a>.</li>
+<li>Политики Samba — <strong>нетатуирующие</strong> (non-tattooing): при удалении GPO из компьютера/пользователя изменения снимаются с члена домена. Управление:</li>
+</ul>
+<pre><code>samba-gpupdate --force      # применить/переприменить политики
+samba-gpupdate --unapply    # снять применённые политики (требует root)
+samba-gpupdate --rsop       # показать Resultant Set of Policy
+</code></pre>
+<ul>
+<li>Опции <code>samba-gpupdate</code>: <code>-X</code>/<code>--unapply</code>, <code>--force</code>, <code>--rsop</code>, <code>--target=Computer|User</code> (по умолчанию <code>Computer</code>) плюс штатные группы credential-опций (учётные данные, <code>-U</code>). Примеры с вики:</li>
+</ul>
+<pre><code>samba-gpupdate --unapply --target=Computer
+samba-gpupdate --unapply --target=User -U&lt;username&gt;
+</code></pre>
+<ul>
+<li>Состояние применённых политик хранится в базе <code>gpo.tdb</code> в cache directory; список CSE (встроенных и зарегистрированных) <code>samba-gpupdate</code> получает при запуске, собственные CSE регистрируются через <code>samba-tool gpo cse register</code>.</li>
+<li>Windows удалять применённые политики не умеет: единственный обходной путь — вывести машину из домена и применить политики заново (<code>gpupdate /force /boot</code>).</li>
+</ul>
+<h3>Linux-политики через samba-tool gpo manage</h3>
+<p>Каталог <code>samba-tool gpo manage</code> (текущая man-страница) — подкоманды <code>sudoers</code>, <code>security</code>, <code>smb_conf</code>, <code>symlink</code>, <code>files</code>, <code>openssh</code>, <code>scripts</code>, <code>motd</code>, <code>issue</code>, <code>access</code>. Примеры с вики:</p>
+<ul>
+<li>Sudoers (совместимость с Vintela): <code>samba-tool gpo manage sudoers add {31B2F340-016D-11D2-945F-00C04FB984F9} ALL ALL fakeu fakeg</code> — на клиенте появляется файл <code>/etc/sudoers.d/gp_XXXXX</code> с записью <code>fakeu,fakeg% ALL=(ALL) NOPASSWD: ALL</code>.</li>
+<li>MOTD/Issue: <code>samba-tool gpo manage motd|issue set</code> — задают содержимое <code>/etc/motd</code> и <code>/etc/issue</code> (VGP-совместимые расширения).</li>
+<li>OpenSSH: <code>samba-tool gpo manage openssh set {GUID} KerberosAuthentication Yes</code> — настройки в <code>/etc/ssh/sshd_config.d</code>.</li>
+<li>Startup-скрипты: <code>samba-tool gpo manage scripts startup add {GUID} test_script.sh '-n'</code> — скрипт загружается на SYSVOL и запускается клиентами при старте (с параметром <code>-n</code>).</li>
+<li>Files: <code>samba-tool gpo manage files add {GUID} ./source.txt /usr/share/doc/target.txt root root 600</code> — файл с SYSVOL раскладывается на клиенты с owner:group и правами.</li>
+<li>Symlink: <code>samba-tool gpo manage symlink add {GUID} /tmp/source /tmp/target</code>.</li>
+<li>Access (PAM, совместимость с Vintela Access Group Policy): <code>samba-tool gpo manage access add {GUID} allow goodguy example.com</code> — правило в <code>/etc/security/access.d/0000000001_gp.conf</code>.</li>
+<li>Security: <code>samba-tool gpo manage security set {GUID} MaxTicketAge 10</code>; возможные политики — <code>MaxTicketAge</code> (в часах), <code>MaxServiceAge</code> (в минутах), <code>MaxRenewAge</code> (в минутах), <code>MinimumPasswordAge</code>/<code>MaximumPasswordAge</code> (в днях), <code>MinimumPasswordLength</code>, <code>PasswordComplexity</code> (1/0). Эти настройки применяются только на AD DC.</li>
+<li>smb.conf: <code>samba-tool gpo manage smb_conf set {GUID} 'apply gpo policies' yes</code> — рассылает глобальные опции smb.conf клиентам. idmap-политики через неё применить нельзя.</li>
+<li>Политики из GPMC, для которых нет <code>gpo manage</code>-команд: Sudo Rights, Messages, Scripts, GNOME Settings, Firewalld, Firefox, Chromium/Chrome (последние три — сторонние шаблоны через <code>admxload --admx-dir</code>); результат применения — файлы вида <code>/etc/sudoers.d/gp_*</code>, <code>/etc/cron.daily/tmp*</code>, <code>/etc/motd</code>, <code>/etc/issue</code>, <code>/etc/security/access.d/*</code>, <code>/etc/chromium|/etc/opt/chrome policies.json</code>, <code>/usr/lib64/firefox/distribution/policies.json</code> и др.</li>
+<li>Для совместимости с Centrify есть расширения для crontab-записей и sudoers: при наличии таких GPO от Centrify они применяются <code>samba-gpupdate</code> автоматически.</li>
+</ul>
+<h3>Windows-члены, GPMC и RSAT</h3>
+<ul>
+<li>Создание и редактирование GPO: Group Policy Management Console (GPMC) входит в Windows RSAT; в ADUC-подобном дереве выбирают домен/контейнер и в меню Action выбирают «Create a GPO in this domain, and Link it here»; редактирование — Edit.</li>
+<li>Политики Samba в редакторе лежат в User (или Computer) Configuration &gt; Policies &gt; Administrative Templates &gt; Samba. Для Samba Domain Controllers применяются также Password и Kerberos настройки: Computer Configuration &gt; Policies &gt; OS Settings &gt; Security Settings &gt; Account Policy (минимальный/максимальный возраст пароля, минимальная длина, сложность; времена жизни Kerberos-билетов).</li>
+<li>Windows-члены применяют политики автоматически; вручную — <code>gpupdate /force</code>.</li>
+<li>Установка RSAT: на Windows 10 (1809 и новее) — через «Optional features»; например, в elevated-консоли:</li>
+</ul>
+<pre><code>dism /online /add-capability /CapabilityName:Rsat.GroupPolicy.Management.Tools~~~~0.0.1.0 /CapabilityName:Rsat.Dns.Tools~~~~0.0.1.0 /CapabilityName:Rsat.ActiveDirectory.DS-LDS.Tools~~~~0.0.1.0
+</code></pre>
+<p>На Windows Server — через Server Manager → Add roles and features, компонент Group Policy Management.</p>
+<ul>
+<li>Администрирование должно идти от имени пользователя с достаточными правами; <code>admxload</code> в SYSVOL возвращает «The authenticated user does not have sufficient privileges», если прав не хватает.</li>
+<li>Ограничение: <code>Server for NIS Tools</code> (вкладка Unix Attributes в ADUC для RFC2307) не поддерживается на Windows 10 и Windows Server 2016 — вкладки Unix Attributes там нет. Обходной путь — задавать атрибуты вручную через вкладку Attributes (нужен включённый в оснастке режим Advanced Features): <code>msSFU30NisDomain</code>, <code>uidNumber</code>, <code>loginShell</code>, <code>unixHomeDirectory</code>, <code>primaryGroupID</code> (пользователи), <code>msSFU30NisDomain</code>, <code>gidNumber</code> (группы). При ручной настройке UID/GID нужно самостоятельно следить за последними использованными номерами.</li>
+</ul>
+<h3>Версии</h3>
+<ul>
+<li><strong>4.9</strong> — команда <code>samba_gpoupdate</code> переименована в <code>samba_gpupdate</code>, синтаксис изменён ближе к Windows (release notes 4.9).</li>
+<li><strong>4.10</strong> — добавлены <code>samba-tool gpo backup</code> и <code>samba-tool gpo restore</code> с generalize/entities; команды <code>samba-tool gpo</code> начали работать против удалённого DC с отключённым SMBv1 (добавлена поддержка SMBv2).</li>
+<li><strong>4.13</strong> — есть <code>samba-tool gpo admxload</code> (проверено по исходнику <code>python/samba/netcmd/gpo.py</code>: в теге samba-4.12.0 команды ещё нет, в теге samba-4.13.0 объявлен <code>class cmd_admxload</code>).</li>
+<li><strong>4.14</strong> — клиентские политики для winbind-клиентов: <code>apply group policies</code>, <code>samba-gpupdate --force/--unapply/--rsop</code>, нетатуирующая семантика, <code>samba-tool gpo manage</code>, ADMX для Samba.</li>
+<li><strong>4.16</strong> — Certificate Auto Enrollment, включаемый групповой политикой (нужны certmonger, cepces, sscep).</li>
+<li><strong>4.19</strong> — появились <code>gpo load</code>, <code>gpo remove</code> и <code>gpo cse register/list/unregister</code>; <code>libgpo.get_gpo_list</code> объявлен устаревшим в пользу python-реализации <code>samba.gp</code>.</li>
+<li><strong>4.20</strong> — исправления <code>samba-gpupdate</code>: поддержка сайтов (BUG 15588) и логирование (BUG 15558).</li>
+<li>Команды <code>gpo show</code>/<code>gpo list</code>/<code>gpo fetch</code>/<code>gpo setlink</code>/<code>dellink</code>/<code>getlink</code>/<code>listcontainers</code>/<code>getinheritance</code>/<code>setinheritance</code> есть уже в git-теге samba-4.9.0 (проверено по <code>python/samba/netcmd/gpo.py</code> тега: классы <code>cmd_show</code>, <code>cmd_list</code>, <code>cmd_fetch</code>, <code>cmd_setlink</code>, <code>cmd_dellink</code>, <code>cmd_getlink</code>, <code>cmd_listcontainers</code>, <code>cmd_getinheritance</code>, <code>cmd_setinheritance</code>; там же <code>listall</code>, <code>create</code>, <code>del</code>, <code>aclcheck</code>).</li>
+</ul>
+<h2>Подводные камни</h2>
+<ul>
+<li><strong>Расхождение про интервал применения:</strong> wiki Samba пишет «enforced at a random interval between 90 and 120 seconds», тогда как release notes 4.14 и man-страница smb.conf говорят про 90 минут плюс случайные 0–30 минут. Формулировку вики следует считать опечаткой (seconds вместо minutes) — сверяйтесь с release notes/man.</li>
+<li><strong>Без шаблонов Microsoft администрировать Windows-члены нельзя</strong>: вики прямо предупреждает, что после установки ADMX Samba обязательно надо поставить и ADMX Microsoft.</li>
+<li><strong><code>msiextract</code> берётся из пакета <code>msitools</code></strong>; без него распаковать MSI с Administrative Templates не получится.</li>
+<li><strong>Несколько DC:</strong> <code>admxload</code> (и другие gpo-команды) надо направлять на нужный DC через <code>-H</code>, иначе шаблоны/изменения попадут не на тот сервер; сами GPO в SYSVOL между DC по-прежнему требуют репликации средствами <a href="%D0%A0%D0%B5%D0%BF%D0%BB%D0%B8%D0%BA%D0%B0%D1%86%D0%B8%D1%8F-SysVol.html">Репликация SysVol</a>.</li>
+<li><strong>Известные дефекты Samba 4.10</strong> (на странице GPO Backup and Restore помечены как открытые, без бэкпортов):
+<ul>
+<li>BUG #13825 — файлы GPE.INI ломают backup (обход: временно убрать GPE.INI и скопировать вручную);</li>
+<li>BUG #13806 — сбой GPT.INI при не-ASCII (акцентированных) display name GPO (обход: избегать не-ASCII имён; либо править GPT.INI руками, не тестировалось);</li>
+<li>BUG #13627 — восстановленный GPO не включается сразу: значения <code>gPCMachineExtensionNames</code> / <code>gPCUserExtensionNames</code> не проставляются (обход: скопировать их по LDAP с исходного DC; в master это делается автоматически, но нужен новый бэкап).
+Исправления — в master (поздних версиях), а не в 4.10.</li>
+</ul>
+</li>
+<li><strong>Генерализация неполная</strong> и у Windows-миграционных таблиц есть пробелы: перенос между доменами всегда проверяйте после restore.</li>
+<li><strong>Файлы бэкапа — XML, но правка вручную легко повреждает GPO</strong> (страница отмечает и обратный режим — fallback на бинарные дубликаты, который маскирует ошибки восстановления).</li>
+<li><strong>Windows не умеет снимать применённые политики</strong> — только unjoin домена + <code>gpupdate /force /boot</code>; нетатуирующее поведение — свойство Samba-политик на Linux-клиентах.</li>
+<li><strong><code>gpo manage security</code> применим только к AD DC</strong>; для работы нужны права на запись в SYSVOL.</li>
+<li><strong><code>smb.conf</code>-политика не умеет idmap</strong>: она рассылает глобальные опции smb.conf, но idmap-настройки применить через неё нельзя (вики).</li>
+<li><strong>Конфликт message-политик</strong>: одновременное применение Samba- и VGP-политик <code>/etc/motd</code> и <code>/etc/issue</code> перезаписывает результаты друг друга — предсказуемости не будет (предупреждение вики).</li>
+<li><strong>Снятие применённых политик требует root</strong> (<code>samba-gpupdate --unapply</code>).</li>
+<li><strong>Документация местами повреждена копипастом</strong>: в man-странице samba-tool.8 у <code>gpo aclcheck</code> осталось описание «Create an empty GPO.», а у <code>gpo remove</code> — «Show information for a GPO.» (оба попали из соседних команд); ориентируйтесь на фактическое назначение и <code>--help</code>.</li>
+<li><strong>Бинарные дубликаты и fallback маскируют ошибки</strong>: в каталоге бэкапа рядом с каждым XML лежит бинарная копия файла с суффиксом <code>.SAMBABACKUP</code>; если XML не разобрался, <code>restore</code> молча берёт бинарный файл (в исходниках помечено, что fallback нельзя отключить, поэтому «то, что должно падать, часто не падает»).</li>
+</ul>
+<h2>Источники</h2>
+<ul>
+<li>https://wiki.samba.org/index.php/Group_Policy — основной обзор: хранение GPO (groupPolicyContainer, gPCFileSysPath, SYSVOL), <code>samba-tool gpo listall/create/setlink</code>, admxload и Microsoft ADMX, Linux-политики и примеры <code>samba-tool gpo manage</code>, RSoP, GP на Windows-членах (сохранена HTML-копия assets/Групповые-Политики-GPO-1.html).</li>
+<li>https://wiki.samba.org/index.php/GPO_Backup_and_Restore — бэкап/восстановление и generalize, entities, известные ошибки 4.10, непокрытые форматы (assets/Групповые-Политики-GPO-2.html).</li>
+<li>https://www.samba.org/samba/docs/current/man-html/samba-tool.8.html — man-страница: подкоманды <code>gpo</code> и их опции, JSON для <code>gpo load</code>/<code>remove</code>, <code>gpo manage ...</code>, <code>gpo cse</code> (assets/Групповые-Политики-GPO-3.html).</li>
+<li>https://www.samba.org/samba/docs/current/man-html/smb.conf.5.html — опции <code>apply group policies</code> и <code>gpo update command</code>, интервал 90 минут + 0–30.</li>
+<li>https://www.samba.org/samba/history/samba-4.14.0.html — клиентские Group Policy в 4.14: <code>apply group policies</code>, интервал, нетатуирующая семантика, <code>samba-gpupdate --unapply/--force/--rsop</code>, <code>admxload</code>, <code>gpo manage</code> (assets/Групповые-Политики-GPO-4.html).</li>
+<li>https://wiki.samba.org/index.php/Installing_RSAT — GPMC в составе RSAT, способы установки RSAT, отсутствие вкладки Unix Attributes на Windows 10/Server 2016 и ручная установка RFC2307-атрибутов (assets/Групповые-Политики-GPO-5.html).</li>
+<li>https://www.samba.org/samba/history/samba-4.9.0.html — переименование <code>samba_gpoupdate</code> → <code>samba_gpupdate</code>.</li>
+<li>https://www.samba.org/samba/history/samba-4.10.0.html — появление <code>samba-tool gpo backup</code>/<code>restore</code>, поддержка SMBv2 для gpo-команд.</li>
+<li>https://www.samba.org/samba/history/samba-4.16.0.html — Certificate Auto Enrollment через групповую политику.</li>
+<li>https://www.samba.org/samba/history/samba-4.19.0.html — изменения gpupdate (python-реализация <code>get_gpo_list</code>).</li>
+<li>https://www.samba.org/samba/history/samba-4.20.0.html — исправления samba-gpupdate (site support, logging).</li>
+<li>https://gitlab.com/samba-team/samba/-/raw/master/source4/scripting/bin/samba-gpupdate — исходник samba-gpupdate: опции <code>-X/--unapply</code>, <code>--force</code>, <code>--rsop</code>, <code>--target</code>.</li>
+<li>https://gitlab.com/samba-team/samba/-/raw/master/python/samba/netcmd/gpo.py — исходник <code>samba-tool gpo</code>: список подкоманд, опции setlink (<code>--disable</code>/<code>--enforce</code>), fetch, admxload (default-dir, предупреждение), cse register.</li>
+<li>https://gitlab.com/samba-team/samba/-/raw/master/docs-xml/manpages/samba-tool.8.xml — исходный текст man-страницы (проверка названий подкоманд и копипаст-артефактов).</li>
+<li>https://gitlab.com/samba-team/samba/-/blob/samba-4.9.0/python/samba/netcmd/gpo.py, https://gitlab.com/samba-team/samba/-/blob/samba-4.12.0/python/samba/netcmd/gpo.py и https://gitlab.com/samba-team/samba/-/blob/samba-4.13.0/python/samba/netcmd/gpo.py — проверка версий по git-тегам: состав подкоманд в 4.9.0 (<code>show</code>, <code>list</code>, <code>fetch</code>, <code>setlink</code>, <code>dellink</code>, <code>getlink</code>, <code>listcontainers</code>, <code>getinheritance</code>, <code>setinheritance</code>, <code>listall</code>, <code>create</code>, <code>del</code>, <code>aclcheck</code>); <code>admxload</code> отсутствует в 4.12.0 и появляется в 4.13.0.</li>
+<li>https://bugzilla.samba.org/show_bug.cgi?id=13825, https://bugzilla.samba.org/show_bug.cgi?id=13806, https://bugzilla.samba.org/show_bug.cgi?id=13627 — открытые дефекты backup/restore на момент Samba 4.10.</li>
+</ul>
+<h2>Связанные заметки</h2>
+<ul>
+<li><a href="%D0%A0%D0%B5%D0%BF%D0%BB%D0%B8%D0%BA%D0%B0%D1%86%D0%B8%D1%8F-SysVol.html">Репликация SysVol</a></li>
+<li><a href="Samba-%D0%BA%D0%B0%D0%BA-%D1%87%D0%BB%D0%B5%D0%BD-%D0%B4%D0%BE%D0%BC%D0%B5%D0%BD%D0%B0.html">Samba как член домена</a></li>
+<li><a href="%D0%A3%D1%81%D1%82%D0%B0%D0%BD%D0%BE%D0%B2%D0%BA%D0%B0-Samba-AD-DC.html">Установка Samba AD DC</a></li>
+<li><a href="Idmap-%D0%B1%D1%8D%D0%BA%D0%B5%D0%BD%D0%B4%D1%8B-%D0%B8-RFC2307.html">Idmap бэкенды и RFC2307</a></li>
+<li><a href="%D0%A0%D0%B5%D0%B7%D0%B5%D1%80%D0%B2%D0%BD%D0%BE%D0%B5-%D0%BA%D0%BE%D0%BF%D0%B8%D1%80%D0%BE%D0%B2%D0%B0%D0%BD%D0%B8%D0%B5-%D0%B8-%D0%B2%D0%BE%D1%81%D1%81%D1%82%D0%B0%D0%BD%D0%BE%D0%B2%D0%BB%D0%B5%D0%BD%D0%B8%D0%B5-AD-DC.html">Резервное копирование и восстановление AD DC</a></li>
+</ul>
+</main>
+</body>
+</html>

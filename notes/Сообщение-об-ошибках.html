@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bug Reporting — как правильно сообщать об ошибках в Samba</title>
+<link rel="stylesheet" href="../style.css">
+</head>
+<body>
+<nav><a href="../index.html">База знаний Samba AD DC</a></nav>
+<main><h1>Bug Reporting — как правильно сообщать об ошибках в Samba</h1>
+<h2>Суть</h2>
+<p>Страница Samba Wiki описывает, куда и как сообщать об ошибках в Samba и в клиенте SMB ядра Linux (cifs.ko). Главные правила: сообщения об ошибках безопасности отправляются только на security@samba.org (никогда — в Bugzilla, IRC или публичные списки рассылки), обычные ошибки — в багтрекер Samba на Bugzilla с обязательным указанием номера версии. Для проблем с kernel-клиентом CIFS приведён набор команд для сбора отладочного вывода ядра и сетевого трассировочного файла.</p>
+<h2>Ключевое</h2>
+<h3>Ошибки в Samba</h3>
+<ul>
+<li>Сообщайте обо всех предполагаемых проблемах безопасности на <strong>security@samba.org</strong>, чтобы команда могла следовать своему процессу работы с уязвимостями (Security Process).</li>
+<li>Прочтите инструкции: https://www.samba.org/~asn/reporting_samba_bugs.txt</li>
+<li>Сообщайте о проблеме в системе отслеживания ошибок Samba (bug tracking system): https://bugzilla.samba.org/</li>
+<li><strong>Всегда указывайте номер версии Samba</strong> в сообщении об ошибке.</li>
+</ul>
+<h3>Ошибки в клиенте SMB ядра Linux (cifs.ko)</h3>
+<ul>
+<li>Если у вас проблема с клиентом SMB в ядре Linux (cifs.ko, mount.cifs) — сообщите об этом.</li>
+<li>Сообщения о проблемах безопасности в kernel-клиенте или в пользовательских утилитах (cifs-utils, mount.cifs) отправляйте на <strong>security@samba.org</strong> — <strong>никогда</strong> через IRC, публичные списки рассылки или Bugzilla.</li>
+<li>Существуют две системы отслеживания ошибок:
+<ul>
+<li>для ядра: <a href="https://bugzilla.samba.org/">раздел ядра в багзилле Samba</a> (в исходном тексте страницы: https://bugzilla.samba.org/)</li>
+<li>для пользовательских утилит cifs: <a href="https://bugzilla.kernel.org/">раздел cifs в багзилле ядра Linux</a></li>
+</ul>
+</li>
+<li>Вопросы можно задать в списке рассылки linux-cifs: linux-cifs@vger.kernel.org</li>
+<li>Полезно приложить дамп трафика (network capture) и консольный лог ядра (kernel console log).</li>
+</ul>
+<p>Команды для сбора отладочной информации (дословно со страницы):</p>
+<pre><code class="language-bash">    # make the kernel as verbose as possible
+    echo 'module cifs +p' &gt; /sys/kernel/debug/dynamic_debug/control
+    echo 'file fs/cifs/* +p' &gt; /sys/kernel/debug/dynamic_debug/control
+    echo 1 &gt; /proc/fs/cifs/cifsFYI
+    echo 1 &gt; /sys/module/dns_resolver/parameters/debug
+
+    # get kernel output + network trace
+    dmesg --clear
+    tcpdump -s 0 -w trace.pcap &amp; pid=$!
+    sleep 3
+    mount.cifs ....cd ... ls.. etc.. (the thing that fails)
+    sleep 3
+    kill $pid
+    dmesg &gt; trace.log
+</code></pre>
+<p>В результате получаются файлы <strong>trace.pcap</strong> (сетевой трассировочный файл) и <strong>trace.log</strong> (вывод ядра).</p>
+<p>При сообщении об ошибке обязательно упомяните:</p>
+<ul>
+<li>версию ядра;</li>
+<li>программное обеспечение сервера и его версию.</li>
+</ul>
+<p>Больше информации: https://wiki.samba.org/index.php/LinuxCIFS_troubleshooting</p>
+<h2>Подводные камни</h2>
+<ul>
+<li><strong>Проблемы безопасности нельзя публиковать</strong> в Bugzilla, в IRC или публичных списках рассылки — только на security@samba.org. Это правило повторяется и для Samba, и для kernel-клиента cifs.</li>
+<li>Без номера версии Samba в сообщении об ошибке репорт считается неполным — версия указывается всегда.</li>
+<li>Для ошибок kernel-клиента обязательно указывайте версию ядра, а также серверное ПО и его версию — без этого воспроизведение затруднено.</li>
+</ul>
+<h2>Связанные заметки</h2>
+<ul>
+<li><a href="%D0%97%D0%B0%D1%85%D0%B2%D0%B0%D1%82-%D0%BF%D0%B0%D0%BA%D0%B5%D1%82%D0%BE%D0%B2.html">Захват пакетов</a></li>
+<li><a href="%D0%94%D0%B8%D0%B0%D0%B3%D0%BD%D0%BE%D1%81%D1%82%D0%B8%D0%BA%D0%B0-AD-DC.html">Диагностика AD DC</a></li>
+<li><a href="Wireshark-%D1%81-keytab.html">Wireshark с keytab</a></li>
+<li><a href="%D0%A1%D0%BE%D0%BE%D0%B1%D1%89%D0%B5%D0%BD%D0%B8%D0%B5-%D0%BE%D0%B1-%D0%BE%D1%88%D0%B8%D0%B1%D0%BA%D0%B5-%D0%B2-%D0%B4%D0%BE%D0%BA%D1%83%D0%BC%D0%B5%D0%BD%D1%82%D0%B0%D1%86%D0%B8%D0%B8.html">Сообщение об ошибке в документации</a></li>
+</ul>
+</main>
+</body>
+</html>

@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Samba Internal DNS Back End</title>
+<link rel="stylesheet" href="../style.css">
+</head>
+<body>
+<nav><a href="../index.html">База знаний Samba AD DC</a></nav>
+<main><h1>Samba Internal DNS Back End</h1>
+<h2>Суть</h2>
+<p>Контроллер домена Samba AD содержит встроенный DNS-сервер (бэкенд <code>INTERNAL_DNS</code>), поддерживающий базовые функции, необходимые Active Directory. Он прост в настройке и не требует дополнительного ПО или знаний о DNS. Этот бэкенд рекомендуется для простых DNS-конфигураций.</p>
+<h2>Ключевое</h2>
+<h3>Ограничения внутреннего DNS</h3>
+<p>Внутренний DNS <strong>не поддерживает</strong>:</p>
+<ul>
+<li>работу в качестве кэширующего резолвера (caching resolver);</li>
+<li>рекурсивные запросы (но умеет пересылать их другому рекурсивному DNS-серверу);</li>
+<li>shared-key transaction signature (TSIG);</li>
+<li>stub-зоны;</li>
+<li>передачу зон (zone transfers);</li>
+<li>балансировку Round Robin между DC.</li>
+</ul>
+<h3>Динамические DNS-обновления через Kerberos</h3>
+<p>Динамические DNS-обновления с использованием Kerberos включены во внутреннем DNS-сервере по умолчанию. Чтобы изменить эту настройку, задайте параметр <code>allow dns updates</code> в файле <code>smb.conf</code>. Подробности — на man-странице smb.conf (5).</p>
+<h3>Настройка DNS-форвардера</h3>
+<p>Внутренний DNS-сервер способен разрешать только DNS-зоны Active Directory. Чтобы включить рекурсивные запросы к другим зонам, задайте в <code>smb.conf</code> параметр <code>dns forwarder</code> — один или несколько IP-адресов DNS-серверов, поддерживающих рекурсивное разрешение. Например:</p>
+<pre><code>dns forwarder = 8.8.8.8
+</code></pre>
+<p>Samba 4.5 и новее поддерживает несколько IP-адресов, разделённых пробелами; более старые версии — только один IP-адрес. Подробности — на man-странице smb.conf (5).</p>
+<h3>Диагностика: клиенты не могут разрешать DNS-запросы</h3>
+<p>Если записи из DNS-зоны Active Directory не разрешаются, проверьте, что в операционной системе клиента указан IP DNS-сервера, способного разрешать зону AD (в вики есть отдельные страницы: Windows DNS Configuration, Linux and Unix DNS Configuration, Mac OS X DNS Configuration).</p>
+<p>Если конфигурация клиента верна, убедитесь, что DNS-сервер Samba запущен (см. следующий пункт).</p>
+<h3>Диагностика: DNS-сервер Samba не запускается</h3>
+<p>Проверьте, что никакой другой процесс не занимает TCP- и UDP-порт 53:</p>
+<ul>
+<li>Просмотрите лог-файлы Samba на предмет DNS-ошибок. Например:</li>
+</ul>
+<pre><code> [2016/01/01 00:00:00.000000,  0] ../source4/smbd/service_stream.c:346(stream_setup_socket)
+  Failed to listen on 127.0.0.1:53 - NT_STATUS_ADDRESS_ALREADY_ASSOCIATED
+</code></pre>
+<ul>
+<li>Убедитесь, что на TCP- и UDP-порту 53 не слушает другой процесс. Например:</li>
+</ul>
+<pre><code># netstat -tulpn | grep &quot;:53&quot;
+tcp        0      0 10.99.0.1:53        0.0.0.0:*               LISTEN      972/dnsmasq
+tcp        0      0 127.0.0.1:53        0.0.0.0:*               LISTEN      903/dnsmasq
+udp        0      0 10.99.0.1:53        0.0.0.0:*                           972/dnsmasq
+udp        0      0 127.0.0.1:53        0.0.0.0:*                           903/dnsmasq
+</code></pre>
+<p>В примере видно, что порт 53 занят процессом <code>dnsmasq</code>.</p>
+<p>Как исправить:</p>
+<ul>
+<li>Остановите службу, слушающую порт 53, и отключите её автозапуск при загрузке (см. документацию вашей операционной системы).</li>
+<li>Перезапустите Samba.</li>
+</ul>
+<h2>Подводные камни</h2>
+<ul>
+<li><strong>Порт 53 уже занят</strong> — самая частая причина, по которой встроенный DNS не стартует; в логе это выглядит как <code>Failed to listen on 127.0.0.1:53 - NT_STATUS_ADDRESS_ALREADY_ASSOCIATED</code>, а виновником в примере из вики выступает <code>dnsmasq</code>.</li>
+<li><strong>Внутренний DNS не кэширует и не резолвит рекурсивно</strong> внешние зоны сам по себе — без настроенного <code>dns forwarder</code> разрешаться будут только зоны AD.</li>
+<li><strong>Нет zone transfers, TSIG, stub-зон и Round Robin между DC</strong> — для сценариев, где это нужно, встроенного бэкенда недостаточно.</li>
+<li><strong>Ограничение по версии</strong>: несколько форвардеров через пробел работают только в Samba 4.5+; в старых версиях <code>dns forwarder</code> принимает лишь один адрес.</li>
+</ul>
+<h2>Связанные заметки</h2>
+<ul>
+<li><a href="%D0%A3%D1%81%D1%82%D0%B0%D0%BD%D0%BE%D0%B2%D0%BA%D0%B0-Samba-AD-DC.html">Установка Samba AD DC</a></li>
+<li><a href="%D0%94%D0%B8%D0%B0%D0%B3%D0%BD%D0%BE%D1%81%D1%82%D0%B8%D0%BA%D0%B0-AD-DC.html">Диагностика AD DC</a></li>
+<li><a href="%D0%9F%D0%BE%D1%80%D1%82%D1%8B-AD-DC.html">Порты AD DC</a></li>
+<li><a href="%D0%A3%D0%BF%D1%80%D0%B0%D0%B2%D0%BB%D0%B5%D0%BD%D0%B8%D0%B5-%D1%81%D0%BB%D1%83%D0%B6%D0%B1%D0%BE%D0%B9-AD-DC.html">Управление службой AD DC</a></li>
+</ul>
+</main>
+</body>
+</html>

@@ -1,0 +1,273 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SELinux и AppArmor для Samba AD DC</title>
+<link rel="stylesheet" href="../style.css">
+</head>
+<body>
+<nav><a href="../index.html">База знаний Samba AD DC</a></nav>
+<main><h1>SELinux и AppArmor для Samba AD DC</h1>
+<h2>Суть</h2>
+<p>На RHEL/Fedora с SELinux в режиме enforcing и на Ubuntu/Debian с AppArmor мандатный контроль может молча ломать вход AD-пользователей через winbind и динамические обновления DNS при BIND9_DLZ (<code>samba_dnsupdate</code>, ошибка <code>dns_tkey_negotiategss: TKEY is unacceptable</code>). Официальный HOWTO по развёртыванию AD DC мандатный контроль не рассматривает, а типовой совет из интернета — «выключить SELinux» — не нужен: и вики Samba, и документация Ubuntu/Fedora показывают, как точечно доразрешить доступ. Общий алгоритм один: найти отказ в аудит-логе, добавить узкое правило (булев флаг, метку файла, локальный модуль политики или локальное дополнение профиля AppArmor) и вернуть enforcing. Отдельно разобрана не мандатная, а обычная DAC-ловушка: при <code>umask 077</code> библиотеки и сокеты Samba в <code>/usr/local/samba</code> недоступны непривилегированным процессам.</p>
+<h2>Ключевое</h2>
+<h3>SELinux: убедиться, что дело в нём (RHEL/Fedora)</h3>
+<p>Диагностика со страницы вики (пример — не работал вход AD-пользователя на DC):</p>
+<pre><code># sestatus
+</code></pre>
+<p><code>sestatus(8)</code> показывает, включён ли SELinux, загруженную политику и режимы — в том числе отдельно <code>Current mode</code> и <code>Mode from config file</code>. Если режим enforcing, отказы пишет auditd:</p>
+<pre><code># grep denied /var/log/audit/audit.log
+</code></pre>
+<p>Если вывод есть — особенно строки, связанные с winbind — вероятная причина найдена. Проверка гипотезы: перевести SELinux в permissive и повторить вход.</p>
+<pre><code># setenforce 0
+# [attempt to log in as an AD user on console interface]
+</code></pre>
+<p>Если вход заработал — виноват SELinux. По <code>setenforce(8)</code>: <code>setenforce 0</code> или <code>Permissive</code> — permissive-режим, <code>setenforce 1</code> или <code>Enforcing</code> — enforcing.</p>
+<h3>Локальный модуль: audit2allow + semodule</h3>
+<p>В permissive-режиме SELinux доступ не запрещает, но продолжает логировать то, что запретил бы. Поэтому сначала надо выполнить все способы входа, которые должны работать (в примере — консоль, SSH и графический вход GDM): иначе на каждый раунд сборки модуля удастся пройти только первый отказ.</p>
+<pre><code># cd /tmp
+# grep denied /var/log/audit/audit.log &gt; selinuxloginfails
+# audit2allow -M samba4 -i selinuxloginfails
+# semodule -i samba4
+# setenforce 1
+</code></pre>
+<ul>
+<li><code>audit2allow -M &lt;имя&gt;</code> генерирует загружаемый пакет модуля, <code>-i</code> — читать вход из файла (<code>audit2allow(1)</code>).</li>
+<li><code>semodule -i MODULE_PKG</code> устанавливает или заменяет пакет модуля (<code>semodule(8)</code>).</li>
+<li>Затем <code>setenforce 1</code> — вернуть enforcing и заново проверить вход на всех интерфейсах.</li>
+</ul>
+<p>Автору страницы это дало вход на консоли, но не по SSH (из-за настроек <code>sshd_config</code>) и не в графическом входе; в консоли всё равно появлялось <code>id: cannot find name for user id 3000018</code> — причина оказалась в правах (см. раздел про DAC-ловушку).</p>
+<h3>Булевы политики samba/smbd</h3>
+<p>Man-страница <code>samba_selinux(8)</code> / <code>smbd_selinux(8)</code> (пакет <code>selinux-policy-doc</code>, Fedora/RHEL/OpenSUSE) перечисляет булевы с описанием и значением по умолчанию. Для Samba важны:</p>
+<table>
+<thead>
+<tr>
+<th>Булев</th>
+<th>Что разрешает</th>
+<th>По умолчанию</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>samba_domain_controller</code></td>
+<td>samba действует как контроллер домена: добавлять пользователей и группы, менять пароли</td>
+<td>off</td>
+</tr>
+<tr>
+<td><code>samba_create_home_dirs</code></td>
+<td>создавать новые домашние каталоги (например, через PAM)</td>
+<td>off</td>
+</tr>
+<tr>
+<td><code>samba_enable_home_dirs</code></td>
+<td>шарить домашние каталоги (samba и winbind-rpcd)</td>
+<td>off</td>
+</tr>
+<tr>
+<td><code>samba_export_all_ro</code></td>
+<td>шарить любой файл или каталог только для чтения</td>
+<td>off</td>
+</tr>
+<tr>
+<td><code>samba_export_all_rw</code></td>
+<td>шарить любой файл или каталог на чтение и запись</td>
+<td>off</td>
+</tr>
+<tr>
+<td><code>samba_portmapper</code></td>
+<td>samba действует как portmapper</td>
+<td>off</td>
+</tr>
+<tr>
+<td><code>samba_run_unconfined</code></td>
+<td>запускать unconfined-скрипты</td>
+<td>off</td>
+</tr>
+</tbody>
+</table>
+<p>Там же есть <code>samba_share_nfs</code>, <code>samba_share_fusefs</code>, <code>samba_load_libgfapi</code> (все отключены по умолчанию).</p>
+<p>Включение (команды из man-страницы; <code>-P</code> делает значение постоянным, без него булев вернётся к значению после перезагрузки — <code>setsebool(8)</code>):</p>
+<pre><code>setsebool -P samba_domain_controller 1
+setsebool -P samba_create_home_dirs 1
+setsebool -P samba_enable_home_dirs 1
+setsebool -P samba_export_all_ro 1
+setsebool -P samba_export_all_rw 1
+setsebool -P samba_portmapper 1
+setsebool -P samba_run_unconfined 1
+</code></pre>
+<p>Значения булева: <code>1</code>, <code>true</code>, <code>on</code> — включить; <code>0</code>, <code>false</code>, <code>off</code> — выключить. Синопсис <code>setsebool(8)</code> допускает список булевых в одной команде, и пример man-страницы использует именно samba-булевы:</p>
+<pre><code># setsebool -P samba_create_home_dirs=on samba_enable_home_dirs=on
+</code></pre>
+<p>(это дословный пример из <code>setsebool(8)</code>; собранный из нескольких булевых набор в одну команду — композиция из документации, а не цитата.)</p>
+<p>Вместо правки отдельного булева можно объявить permissive сам тип процесса:</p>
+<pre><code># semanage permissive -a smbd_t
+</code></pre>
+<p>Тогда SELinux не будет отказывать <code>smbd_t</code>, но AVC-сообщения об отказах всё равно генерируются (<code>smbd_selinux(8)</code>).</p>
+<h3>Метки файлов: samba_share_t и restorecon</h3>
+<p>Страница Fedora «SELinux/samba» (это текст <code>samba_selinux(8)</code>, автор Dan Walsh, 22 Nov 2011) про файловые контексты: если публиковать не только домашние каталоги, файлы должны иметь метку <code>samba_share_t</code>.</p>
+<pre><code>chcon -t samba_share_t /var/eng
+</code></pre>
+<p>Чтобы метка пережила relabel, правило добавляют через <code>semanage fcontext</code> и применяют <code>restorecon</code>:</p>
+<pre><code>semanage fcontext -a -t samba_share_t &quot;/var/eng(/.*)?&quot;
+restorecon -R -v /var/eng/
+</code></pre>
+<ul>
+<li><code>semanage fcontext</code> пишет локальное правило в <code>/etc/selinux/POLICYTYPE/contexts/files/file_contexts.local</code>, а <code>restorecon</code> применяет его на диск.</li>
+<li>По <code>semanage-fcontext(8)</code> локальные правила из <code>file_contexts.local</code> приоритетнее правил из модулей политики, обрабатываются от новых к старым, и побеждает первое совпадение — поэтому регулярка должна быть как можно конкретнее.</li>
+<li><code>restorecon</code> по умолчанию не рекурсивен (нужен <code>-R</code> или <code>-r</code>) и меняет только type-часть контекста, если не указан <code>-F</code> (<code>restorecon(8)</code>).</li>
+</ul>
+<p>Актуальный пример из Fedora Quick Docs (шара для пользователя):</p>
+<pre><code>$ sudo mkdir /home/jane/share
+$ sudo semanage fcontext --add --type &quot;samba_share_t&quot; &quot;/home/jane/share(/.*)?&quot;
+$ sudo restorecon -R ~/share
+</code></pre>
+<p>Fedora-страница напоминает и про использование удалённых домашних каталогов:</p>
+<pre><code>setsebool -P use_samba_home_dirs 1
+</code></pre>
+<p>и про <code>public_content_t</code> / <code>public_content_rw_t</code> — общий контекст для шаринга одного каталога несколькими сервисами (Apache, FTP, rsync, Samba), с разрешением записи через булев <code>allow_smbd_anon_write</code>:</p>
+<pre><code>setsebool -P allow_smbd_anon_write=1
+</code></pre>
+<h3>AppArmor на Ubuntu/Debian: профили smbd и nmbd</h3>
+<p>Профили для <code>/usr/sbin/smbd</code> и <code>/usr/sbin/nmbd</code> поставляются пакетом <code>apparmor-profiles</code> (поиск по содержимому пакетов Ubuntu подтверждает: <code>/etc/apparmor.d/usr.sbin.smbd</code> — пакет <code>apparmor-profiles</code>).</p>
+<pre><code>$ sudo apt install apparmor-profiles apparmor-utils
+</code></pre>
+<p>По умолчанию оба профиля стоят в режиме complain: Samba работает без правки профиля, а нарушения только логируются. Исключения для общих ресурсов добавлять не нужно — unit smbd делает это сам через helper-скрипт. Сообщение ALLOWED значит, что в enforce-режиме действие было бы запрещено:</p>
+<pre><code>Jun 30 14:41:09 ubuntu kernel: [ 621.478989] audit:
+type=1400 audit(1656600069.123:418):
+apparmor=&quot;ALLOWED&quot; operation=&quot;exec&quot; profile=&quot;smbd&quot;
+name=&quot;/usr/lib/x86_64-linux-gnu/samba/samba-bgqd&quot; pid=4122 comm=&quot;smbd&quot;
+requested_mask=&quot;x&quot; denied_mask=&quot;x&quot; fsuid=0 ouid=0
+target=&quot;smbd//null-/usr/lib/x86_64-linux-gnu/samba/samba-bgqd&quot;
+</code></pre>
+<p>(в источнике это одна запись, разбитая на строки для наглядности.)</p>
+<p>Перевод профиля в enforce и перезагрузка:</p>
+<pre><code>$ sudo aa-enforce /usr/sbin/smbd
+$ sudo apparmor_parser -r -W -T /etc/apparmor.d/usr.sbin.smbd
+</code></pre>
+<ul>
+<li><code>aa-enforce</code> переключает профиль в enforce-режим (режим по умолчанию — enforce, а <code>aa-complain</code> его меняет) — <code>aa-enforce(8)</code>.</li>
+<li><code>apparmor_parser -r</code> заменяет уже загруженное в ядро определение профиля, <code>-W</code> пишет кэш, <code>-T</code> отключает чтение профиля из кэша — <code>apparmor_parser(8)</code>.</li>
+</ul>
+<p>Мониторинг: <code>/var/log/syslog</code> на записи <code>DENIED</code>, либо <code>/var/log/audit/audit.log</code>, если запущен auditd. Действия, заблокированные AppArmor, могут выглядеть в приложении как странные и не связанные с профилем ошибки.</p>
+<p>Важная деталь <code>aa-complain(8)</code>: в complain-режиме политика не применяется, но правила <code>deny</code> продолжают действовать и в этом режиме («Note that 'deny' rules will be enforced even in complain mode»).</p>
+<p>Профиль <code>/etc/apparmor.d/usr.sbin.named</code> в Ubuntu поставляется пакетом <code>bind9</code>, а профиля AppArmor для <code>winbindd</code> в Ubuntu noble в пакетах нет (поиск по содержимому пакетов файла профиля не находит).</p>
+<h3>AppArmor и SELinux для BIND9_DLZ (samba_dnsupdate и TKEY)</h3>
+<p>Страница интеграции: если <code>samba_dnsupdate</code> и <code>nsupdate</code> возвращают <code>dns_tkey_negotiategss: TKEY is unacceptable</code>, процесс BIND должен иметь</p>
+<ul>
+<li>чтение: <code>/usr/local/samba/private/dns.keytab</code>, <code>/usr/local/samba/private/named.conf</code>;</li>
+<li>чтение-запись: каталог <code>/usr/local/samba/private/dns/</code> и свои zone-файлы.</li>
+</ul>
+<p>Provision пытается выставить права сам, но правка AppArmor/SELinux может понадобиться; при AppArmor помогает команда <code>aa-logprof</code>.</p>
+<p>Права (DAC), переменная задаёт имя зоны:</p>
+<pre><code>MYREALM=&quot;samdom.example.com&quot;
+
+chown named:named /usr/local/samba/private/dns
+chgrp named /usr/local/samba/private/dns.keytab
+chmod g+r /usr/local/samba/private/dns.keytab
+chmod 775 /usr/local/samba/private/dns
+</code></pre>
+<p>Метки разово (<code>chcon</code>):</p>
+<pre><code>chcon -t named_conf_t /usr/local/samba/private/dns.keytab
+chcon -t named_conf_t /usr/local/samba/private/named.conf.update
+chcon -t named_var_run_t /usr/local/samba/private/dns
+chcon -t named_var_run_t /usr/local/samba/private/dns/${MYREALM}.zone
+</code></pre>
+<p>Те же метки постоянно (<code>semanage fcontext</code>, чтобы пережили relabel):</p>
+<pre><code>semanage fcontext -a -t named_conf_t /usr/local/samba/private/dns.keytab
+semanage fcontext -a -t named_conf_t /usr/local/samba/private/named.conf
+semanage fcontext -a -t named_conf_t /usr/local/samba/private/named.conf.update
+semanage fcontext -a -t named_var_run_t /usr/local/samba/private/dns
+semanage fcontext -a -t named_var_run_t /usr/local/samba/private/dns/${MYREALM}.zone
+semanage fcontext -a -t named_var_run_t /usr/local/samba/private/dns/${MYREALM}.zone.jnl
+</code></pre>
+<p>Инструкция вики оговорена как предназначенная для RHEL6, но пригодная как ориентир для других дистрибутивов; там же сказано, что Samba-специфичная SELinux-политика ещё не написана, но всё должно работать без отключения SELinux.</p>
+<p>AppArmor: дополнения в конец файла <code>/etc/apparmor.d/local/usr.sbin.named</code> (создать, если его нет), затем перезапустить apparmor:</p>
+<pre><code># Samba DLZ and Active Directory Zones (default source installation)
+/usr/local/samba/lib/** rm,
+/usr/local/samba/private/dns.keytab rk,
+/usr/local/samba/private/named.conf r,
+/usr/local/samba/private/dns/** rwk,
+/usr/local/samba/etc/smb.conf r,
+</code></pre>
+<p>Дополнительные пути, понадобившиеся на конкретных дистрибутивах (там же):</p>
+<pre><code>/var/tmp/** rwmk,     # Ubuntu 14.04.1 LTS: BIND создавал /var/tmp/DNS_110
+/dev/urandom rw,      # Ubuntu 16.04 LTS
+</code></pre>
+<p>Диагностика по странице про ошибку TKEY:</p>
+<pre><code># sudo dmesg | grep DENIED
+</code></pre>
+<p>искать <code>usr.sbin.named</code>; пример отказа:</p>
+<pre><code>apparmor=&quot;DENIED&quot; operation=&quot;file_lock&quot; profile=&quot;/usr/sbin/named&quot; name=&quot;/var/tmp/krb5_108.rcache2&quot; pid=99523 comm=&quot;named&quot; requested_mask=&quot;k&quot; denied_mask=&quot;k&quot; fsuid=108 ouid=108
+</code></pre>
+<p>Недостающие права добавляют в <code>/etc/apparmor.d/usr.sbin.named</code> или в <code>/etc/apparmor.d/local/usr.sbin.named</code> («Don't forget the include in /etc/apparmor.d/usr.sbin.named»), после чего перезагружают профиль:</p>
+<pre><code># sudo systemctl restart apparmor
+</code></pre>
+<p>или</p>
+<pre><code># sudo apparmor_parser -r /etc/apparmor.d/usr.sbin.named
+</code></pre>
+<h3>Версии: private → bind-dns (Samba 4.8)</h3>
+<ul>
+<li>Страница интеграции с AppArmor/SELinux: «From Samba 4.8.0 <code>/usr/local/samba/private</code> is replaced by <code>/usr/local/samba/bind-dns</code>».</li>
+<li>Страница про ошибку TKEY: «The binddns dir was changed at Samba 4.8.0 from <code>/usr/local/samba/private/dns</code> to <code>/usr/local/samba/bind-dns/dns</code>».</li>
+<li>В <code>smb.conf(5)</code> параметр <code>binddns dir</code> (синоним <code>bind dns directory</code>) по умолчанию равен <code>${prefix}/bind-dns</code>, и каталог должен быть на том же mount point, что и private-каталог.</li>
+<li>В release notes 4.8.0 параметр <code>binddns dir</code> помечен как новый.</li>
+<li>При этом страница BIND9_DLZ_DNS_Back_End местами всё ещё приводит старые пути: <code>named.conf</code> там описан уже как <code>/usr/local/samba/bind-dns/named.conf</code> (с оговоркой про 4.7 и раньше), а <code>tkey-gssapi-keytab</code> в примере — <code>/usr/local/samba/private/dns.keytab</code>.</li>
+</ul>
+<h3>DAC-ловушка: umask 077 и права на /usr/local/samba</h3>
+<p>Отдельно от мандатного контроля: при <code>umask 077</code> (как было у автора при сборке Samba 4 из исходников) файлы принадлежат root и доступны только root. Библиотеки в <code>/usr/local/samba/lib</code> и сокет winbind недоступны процессам, работающим от имени пользователя, поэтому <code>id</code> и <code>whoami</code> не видят AD-пользователя, даже когда вход уже разрешён. Симптомы: <code>id: cannot find name for user id 3000018</code>, приглашение <code>[&quot;I have no name!&quot;@server]$</code>, а графический вход GDM аутентифицирует пользователя, но X сразу завершается и возвращает на экран входа. Лечение:</p>
+<pre><code># chmod 755 /usr/local/samba /usr/local/samba/var /usr/local/samba/var/run \
+     /usr/local/samba/var/run/winbindd
+# chmod -R 755 /usr/local/samba/lib
+</code></pre>
+<p>Если не помогло — войти AD-пользователем на консоль и выполнить <code>strace</code> на <code>id</code> и <code>whoami</code>, обращая внимание на ошибки <code>ENOACCES</code> (в источнике именно так); для X смотреть <code>~/.xsession-errors</code>.</p>
+<h2>Подводные камни</h2>
+<ul>
+<li>Цель — не отключать защиту целиком, а точечно доразрешить нужное: это прямо позиция страницы вики («Everything working without disabling SELinux») и документации Ubuntu (профили можно оставлять включёнными, отслеживая ALLOWED/DENIED).</li>
+<li><code>audit2allow</code> генерирует только TE allow-правила, и man-страница предупреждает: результат нужно оценивать осторожно, часто правильнее определить новые домены и типы, чем слепо внедрять широкие разрешения (<code>audit2allow(1)</code>).</li>
+<li>В permissive-режиме SELinux логирует только то, что произошло фактически: если не выполнить все нужные операции (все интерфейсы входа) до сборки модуля, придётся делать несколько раундов <code>audit2allow</code>/<code>semodule</code>.</li>
+<li><code>setsebool</code> без <code>-P</code> не переживёт перезагрузку: постоянные значения пишутся в файл политики только с <code>-P</code> (<code>setsebool(8)</code>).</li>
+<li>В complain-режиме AppArmor правила <code>deny</code> всё равно применяются (<code>aa-complain(8)</code>), а профили smbd/nmbd в Ubuntu по умолчанию именно в complain — то есть до перевода в enforce они ничего не блокируют; после перевода стоит отдельно последить за логом, потому что заблокированные операции могут выглядеть как не связанные с профилем ошибки приложения.</li>
+<li>Локальные правила <code>semanage fcontext</code> приоритетнее правил модулей политики и срабатывают по первому совпадению, поэтому нужны максимально конкретные регулярные выражения (<code>semanage-fcontext(8)</code>); после изменения контекстов не забыть <code>restorecon</code>, иначе метка на файлах не поменяется.</li>
+<li><code>restorecon</code> не рекурсивен без <code>-R</code> и меняет только type-часть контекста без <code>-F</code> (<code>restorecon(8)</code>).</li>
+<li>Массового <code>restorecon -Rv /</code> (по всей файловой системе) в источниках нет: и страница Fedora, и Fedora Quick Docs применяют <code>restorecon</code> к конкретному каталогу (<code>restorecon -R -v /var/eng/</code>, <code>restorecon -R ~/share</code>). Точечная разметка каталогов общих ресурсов безопаснее полного relabel.</li>
+<li>Пути в примерах зависят от версии Samba: <code>/usr/local/samba/private/...</code> актуально для 4.7 и раньше, с 4.8.0 — <code>/usr/local/samba/bind-dns/...</code>; примеры вики и вывод <code>samba_upgradedns</code> местами всё ещё показывают старые пути, поэтому команды нельзя копировать без подстановки актуального пути.</li>
+<li>Причина может быть не в мандатном контроле, а в обычных правах: для provision/join/upgrade на Samba до 4.4.0 у <code>dns.keytab</code> были неверные права и их исправляют (<code>chmod 640</code>, <code>chown root:named</code>); при обновлении с версии раньше 4.8.0 проверяют права на каталог <code>/usr/local/samba/bind-dns</code> (<code>chmod 770</code>, <code>chown root:named</code>); у join на Samba &gt;= 4.8.0 известен баг 14535 — keytab не создаётся в правильном каталоге (обходной путь на момент описания — временно переключиться на внутренний DNS-бэкенд и снова на BIND9_DLZ).</li>
+<li>SELinux-раздел страницы BIND9_DLZ написан для RHEL6 и признаёт, что полноценной Samba-специфичной политики ещё нет; сам автор страницы про SELinux подчёркивает, что настройка отличается от системы к системе и от дистрибутива к дистрибутиву, а официальный HOWTO по AD DC SELinux не рассматривает.</li>
+<li>Примеры правил AppArmor для named помечены в вики как «default source installation» (сборка из исходников в <code>/usr/local/samba</code>); для пакетных установок пути другие, и на некоторых дистрибутивах требуются дополнительные пути — источник советует смотреть собственные логи AppArmor.</li>
+</ul>
+<h2>Источники</h2>
+<ul>
+<li>https://wiki.samba.org/index.php/Troubleshooting_SELinux_on_a_Samba_AD_DC — диагностика (<code>sestatus</code>, <code>grep denied</code>, <code>setenforce 0</code>), сборка локального модуля через <code>audit2allow -M samba4 -i</code> и <code>semodule -i</code>, DAC-ловушка <code>umask 077</code> и <code>chmod 755</code> на <code>/usr/local/samba</code>. HTML-копия: <code>assets/SELinux-и-AppArmor-для-Samba-AD-DC-1.html</code>.</li>
+<li>https://wiki.samba.org/index.php/BIND9_DLZ_AppArmor_and_SELinux_Integration — требования BIND к <code>dns.keytab</code>/<code>named.conf</code>/каталогу зон, метки <code>named_conf_t</code>/<code>named_var_run_t</code>, правила AppArmor для <code>/etc/apparmor.d/local/usr.sbin.named</code>, оговорка про Samba 4.8. HTML-копия: <code>assets/SELinux-и-AppArmor-для-Samba-AD-DC-2.html</code>.</li>
+<li>https://wiki.samba.org/index.php/Dns_tkey_negotiategss:_TKEY_is_unacceptable — <code>dmesg | grep DENIED</code>, пример DENIED для <code>usr.sbin.named</code>, локальные дополнения профиля и их подключение, перезагрузка AppArmor; там же оговорка про <code>binddns dir</code> с 4.8.0. HTML-копия: <code>assets/SELinux-и-AppArmor-для-Samba-AD-DC-3.html</code>.</li>
+<li>https://ubuntu.com/server/docs/how-to/samba/apparmor-profile/ — установка <code>apparmor-profiles</code>/<code>apparmor-utils</code>, complain-режим по умолчанию, пример ALLOWED, <code>aa-enforce</code> + <code>apparmor_parser -r -W -T</code>, мониторинг <code>/var/log/syslog</code> и <code>audit.log</code>. HTML-копия: <code>assets/SELinux-и-AppArmor-для-Samba-AD-DC-4.html</code>.</li>
+<li>https://fedoraproject.org/wiki/SELinux/samba — текст <code>samba_selinux(8)</code> (Dan Walsh, 2011): метки <code>samba_share_t</code>, <code>chcon</code>/<code>semanage fcontext</code>/<code>restorecon</code>, булевы <code>samba_enable_home_dirs</code>, <code>use_samba_home_dirs</code>, <code>allow_smbd_anon_write</code>, контексты <code>public_content_*</code>. HTML-копия: <code>assets/SELinux-и-AppArmor-для-Samba-AD-DC-5.html</code>.</li>
+<li>https://www.mankier.com/8/samba_selinux и https://manpages.opensuse.org/Tumbleweed/selinux-policy-doc/samba_selinux.8 — man-страница <code>smbd_selinux(8)</code>/<code>samba_selinux(8)</code> из <code>selinux-policy-doc</code>: описания и значения по умолчанию булевых <code>samba_*</code>, <code>semanage permissive -a smbd_t</code>.</li>
+<li>https://manpages.ubuntu.com/manpages/noble/man8/aa-complain.8.html — семантика complain-режима, в том числе «deny rules will be enforced even in complain mode».</li>
+<li>https://manpages.ubuntu.com/manpages/noble/man8/aa-enforce.8.html — перевод профиля в enforce.</li>
+<li>https://manpages.ubuntu.com/manpages/noble/man8/apparmor_parser.8.html — значения опций <code>-r</code>, <code>-W</code>, <code>-T</code>.</li>
+<li>https://man7.org/linux/man-pages/man8/setsebool.8.html — <code>-P</code>, список булевых в одной команде, пример с samba-булевыми.</li>
+<li>https://man7.org/linux/man-pages/man8/sestatus.8.html — поля вывода <code>sestatus</code>.</li>
+<li>https://man7.org/linux/man-pages/man8/setenforce.8.html — значения <code>0</code>/<code>1</code> и их смысл.</li>
+<li>https://man7.org/linux/man-pages/man8/semodule.8.html — <code>-i, --install=MODULE_PKG</code>.</li>
+<li>https://man7.org/linux/man-pages/man1/audit2allow.1.html — ключи <code>-M</code>, <code>-i</code> и предупреждение о широких правилах.</li>
+<li>https://man7.org/linux/man-pages/man8/semanage-fcontext.8.html — приоритет <code>file_contexts.local</code>, порядок обработки и точность регулярных выражений.</li>
+<li>https://man7.org/linux/man-pages/man8/restorecon.8.html — <code>-R</code>/<code>-r</code>, <code>-v</code>, замена только type-части контекста.</li>
+<li>https://www.samba.org/samba/docs/current/man-html/smb.conf.5.html — параметр <code>binddns dir</code> (синоним <code>bind dns directory</code>), значение по умолчанию <code>${prefix}/bind-dns</code>.</li>
+<li>https://www.samba.org/samba/history/samba-4.8.0.html — в списке изменений <code>smb.conf</code> за 4.8.0 параметр <code>binddns dir</code> помечен как новый.</li>
+<li>https://wiki.samba.org/index.php/BIND9_DLZ_DNS_Back_End — требования к правам <code>dns.keytab</code>, оговорка про смену каталога на 4.8.0, баг 14535, текущие примеры конфигурации BIND9_DLZ.</li>
+<li>https://docs.fedoraproject.org/en-US/quick-docs/samba/ — актуальный пример разметки общего каталога (<code>semanage fcontext --add --type &quot;samba_share_t&quot;</code> + <code>restorecon -R</code>).</li>
+<li>https://packages.ubuntu.com/search?searchon=contents&amp;keywords=usr.sbin.smbd&amp;mode=exactfilename&amp;suite=noble&amp;arch=any — принадлежность <code>/etc/apparmor.d/usr.sbin.smbd</code> пакету <code>apparmor-profiles</code> (тем же способом проверены <code>usr.sbin.named</code> → <code>bind9</code> и отсутствие профиля для winbindd).</li>
+</ul>
+<h2>Связанные заметки</h2>
+<ul>
+<li><a href="%D0%A5%D0%B0%D1%80%D0%B4%D0%B5%D0%BD%D0%B8%D0%BD%D0%B3-Samba-AD-DC.html">Харденинг Samba AD DC</a></li>
+<li><a href="BIND9-DLZ-DNS-%D0%B1%D1%8D%D0%BA%D0%B5%D0%BD%D0%B4.html">BIND9 DLZ DNS бэкенд</a></li>
+<li><a href="%D0%94%D0%B8%D0%B0%D0%B3%D0%BD%D0%BE%D1%81%D1%82%D0%B8%D0%BA%D0%B0-AD-DC.html">Диагностика AD DC</a></li>
+<li><a href="%D0%A3%D1%81%D1%82%D0%B0%D0%BD%D0%BE%D0%B2%D0%BA%D0%B0-Samba-AD-DC.html">Установка Samba AD DC</a></li>
+<li><a href="%D0%94%D0%B8%D1%81%D1%82%D1%80%D0%B8%D0%B1%D1%83%D1%82%D0%B8%D0%B2%D0%BD%D1%8B%D0%B5-%D0%BF%D0%B0%D0%BA%D0%B5%D1%82%D1%8B-Samba-AD-DC.html">Дистрибутивные пакеты Samba AD DC</a></li>
+</ul>
+</main>
+</body>
+</html>

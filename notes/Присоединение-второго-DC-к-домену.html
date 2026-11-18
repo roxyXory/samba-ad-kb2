@@ -1,0 +1,234 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Присоединение второго DC к домену</title>
+<link rel="stylesheet" href="../style.css">
+</head>
+<body>
+<nav><a href="../index.html">База знаний Samba AD DC</a></nav>
+<main><h1>Присоединение второго DC к домену</h1>
+<h2>Суть</h2>
+<p>Один контроллер домена (DC) достаточен для работающего леса Active Directory (AD), но ради отказоустойчивости и балансировки нагрузки в лес стоит добавить дополнительные DC. Страница описывает присоединение дополнительного Samba DC к существующему AD: подготовку хоста (DNS, Kerberos, время), команду <code>samba-tool domain join</code>, запуск службы, синхронизацию idmap.ldb и SysVol, а также проверку DNS и репликации после join. Присоединение дополнительного DC отличается от провижининга первого DC в лесу.</p>
+<h2>Ключевое</h2>
+<h3>Терминология и ограничения</h3>
+<ul>
+<li>NT4-домен использует один PDC и опциональные BDC; в лесу AD разницы между DC нет, кроме FSMO-ролей — пользуйтесь только термином «domain controller» (DC).</li>
+<li>Не провижиньте компьютер как Samba AD DC, а затем пытайтесь присоединить его к существующему AD-домену — это не сработает; достаточно выполнить <code>samba-tool domain join</code>.</li>
+<li>При join Samba DC к существующему Windows AD-домену, провиженному как Windows 2003 (или ранее), в домене должен работать интегрированный в домен DNS-сервер, настроенный с поведением 2008.</li>
+</ul>
+<h3>Подготовка</h3>
+<ul>
+<li>Установка Samba и подготовка хоста — как для первого DC (см. <a href="%D0%A3%D1%81%D1%82%D0%B0%D0%BD%D0%BE%D0%B2%D0%BA%D0%B0-Samba-AD-DC.html">Установка Samba AD DC</a>); устанавливайте поддерживаемую (maintained) версию Samba.</li>
+<li>Локальный DNS-сервер: по умолчанию первый DC леса обслуживает DNS-зоны AD; для отказоустойчивости рекомендуется, чтобы DNS-сервис держали несколько DC. Для бэкенда BIND9_DLZ завершите его настройку до запуска службы Samba DC; для внутреннего DNS дополнительных действий не требуется.</li>
+<li>Время: Kerberos требует синхронизированного времени на всех членах домена — настройка ntpd описана в <a href="%D0%A1%D0%B8%D0%BD%D1%85%D1%80%D0%BE%D0%BD%D0%B8%D0%B7%D0%B0%D1%86%D0%B8%D1%8F-%D0%B2%D1%80%D0%B5%D0%BC%D0%B5%D0%BD%D0%B8.html">Синхронизация времени</a>.</li>
+</ul>
+<h3>DNS и Kerberos перед join</h3>
+<ul>
+<li>nameserver в <code>/etc/resolv.conf</code> должен указывать на другой AD DC — иначе join не сможет найти KDC / не выполнится. После успешного join смените nameserver на IP нового DC; не используйте <code>127.0.0.1</code> или какой-либо другой IP.</li>
+<li>Настройки в <code>/etc/krb5.conf</code>:</li>
+</ul>
+<pre><code class="language-ini">[libdefaults]
+    dns_lookup_realm = false
+    dns_lookup_kdc = true
+    default_realm = SAMDOM.EXAMPLE.COM
+</code></pre>
+<ul>
+<li>Проверка настроек — запрос билета Kerberos для администратора домена:</li>
+</ul>
+<pre><code class="language-bash"># kinit administrator
+Password for administrator@SAMDOM.EXAMPLE.COM:
+</code></pre>
+<ul>
+<li>Список билетов Kerberos:</li>
+</ul>
+<pre><code class="language-bash"># klist
+Ticket cache: FILE:/tmp/krb5cc_0
+Default principal: administrator@SAMDOM.EXAMPLE.COM
+
+Valid starting       Expires              Service principal
+24.09.2015 19:56:55  25.09.2015 05:56:55  krbtgt/SAMDOM.EXAMPLE.COM@SAMDOM.EXAMPLE.COM
+	renew until 25.09.2015 19:56:53
+</code></pre>
+<h3>Присоединение к домену</h3>
+<p>Три способа аутентификации: логин и пароль либо два варианта Kerberos (оба требуют предварительно выполненного <code>kinit</code> от администратора).</p>
+<p>Логин и пароль:</p>
+<pre><code class="language-bash"># samba-tool domain join samdom.example.com DC -U&quot;SAMDOM\administrator&quot;
+</code></pre>
+<p>Или:</p>
+<pre><code class="language-bash"># samba-tool domain join samdom.example.com DC -k yes
+</code></pre>
+<p>Или:</p>
+<pre><code class="language-bash"># samba-tool domain join samdom.example.com DC --use-krb5-ccache=/tmp/krb5cc_0
+</code></pre>
+<p>Пример вывода на странице заканчивается строкой:</p>
+<pre><code>Joined domain SAMDOM (SID S-1-5-21-469703510-2364959079-1506205053) as a DC
+</code></pre>
+<p>Дополнительные параметры, часто используемые с <code>samba-tool domain join</code>:</p>
+<ul>
+<li><code>--dns-backend=NAMESERVER-BACKEND</code> — использовать указанный DNS-бэкенд; допустимые варианты <code>SAMBA_INTERNAL</code> или <code>BIND9_DLZ</code>; если Bind9 не нужен, опция не требуется (см. <a href="%D0%92%D0%BD%D1%83%D1%82%D1%80%D0%B5%D0%BD%D0%BD%D0%B8%D0%B9-DNS-%D0%B1%D1%8D%D0%BA%D0%B5%D0%BD%D0%B4.html">Внутренний DNS бэкенд</a>).</li>
+<li>При внутреннем DNS у вас не спросят forwarder, и он не будет получен из <code>/etc/resolv.conf</code> автоматически — задайте его: <code>--option=&quot;dns forwarder=forwarder_ipaddress&quot;</code>.</li>
+<li><code>--site=SITE</code> — сразу присоединить хост как DC к конкретному сайту AD.</li>
+<li><code>--option=&quot;interfaces=lo eth0&quot; --option=&quot;bind interfaces only=yes&quot;</code> — если у сервера несколько сетевых интерфейсов: привязывает Samba к указанным интерфейсам, чтобы samba-tool зарегистрировал в каталоге правильный LAN IP.</li>
+<li>Если остальные DC — Samba, провижененные с <code>--use-rfc2307</code>, следует добавить к команде join <code>--option='idmap_ldb:use rfc2307 = yes'</code>.</li>
+</ul>
+<p>Подробнее — вывод <code>samba-tool domain join --help</code>.</p>
+<h3>Запуск службы Samba</h3>
+<p>Запуск вручную:</p>
+<pre><code class="language-bash"># samba
+</code></pre>
+<p>Samba не предоставляет скрипты System V init, systemd, upstart и другие файлы конфигурации служб:</p>
+<ul>
+<li>при установке из пакетов используйте скрипт или файл конфигурации службы из пакета;</li>
+<li>при сборке Samba — см. <a href="%D0%A3%D0%BF%D1%80%D0%B0%D0%B2%D0%BB%D0%B5%D0%BD%D0%B8%D0%B5-%D1%81%D0%BB%D1%83%D0%B6%D0%B1%D0%BE%D0%B9-AD-DC.html">Управление службой AD DC</a>.</li>
+</ul>
+<h3>DNS после join</h3>
+<ul>
+<li>После успешного join измените первый nameserver в <code>/etc/resolv.conf</code> на IP нового DC — это поможет в создании DNS-записей, которые не были созданы join-ом.</li>
+<li>В Samba 4.7.0 и новее samba-tool создаёт необходимые начальные DNS-записи автоматически; на более старых версиях их создают вручную (см. Verifying and Creating a DC DNS Record). После запуска Samba скрипт <code>samba_dnsupdate</code> должен создать все остальные требуемые записи.</li>
+<li>Если при join выбран бэкенд BIND9_DLZ — настройте конфигурацию BIND (см. <a href="BIND9-DLZ-DNS-%D0%B1%D1%8D%D0%BA%D0%B5%D0%BD%D0%B4.html">BIND9 DLZ DNS бэкенд</a>).</li>
+<li>DNS-конфигурация на контроллерах домена важна: если DC не может найти другие DC, репликация будет падать. На новом DC в качестве primary nameserver вписывают его собственный LAN IP — в примере страницы это <code>10.99.0.2</code>, то есть адрес самого нового DC (страница называет его «primary domain controller», но в её же примере два DC: <code>DC1</code> = 10.99.0.1, новый DC = 10.99.0.2 — формулировка источника неточна). Пример <code>/etc/resolv.conf</code>:</li>
+</ul>
+<pre><code>nameserver 10.99.0.2
+search samdom.example.com
+</code></pre>
+<h3>ID-маппинг встроенных пользователей/групп и SysVol</h3>
+<ul>
+<li>
+<p>Samba в текущем виде не поддерживает репликацию SysVol через DFS-R или старую FRS (Windows Server 2000/2003). Рекомендуемые обходные пути: «Rsync based SysVol replication workaround» (только Samba DC — быстрый и простой), «Bidirectional Rsync/Unison based» и «Bidirectional Rsync/osync based» (сложнее, нужен сторонний скрипт и cron-задача на каждом DC против каждого), «Robocopy based» (Samba DC → Windows DC). Детали rsync-варианта — <a href="%D0%A0%D0%B5%D0%BF%D0%BB%D0%B8%D0%BA%D0%B0%D1%86%D0%B8%D1%8F-SysVol.html">Репликация SysVol</a>.</p>
+</li>
+<li>
+<p>Для работы обходных путей все DC должны использовать одинаковые ID-маппинги встроенных пользователей и групп. По умолчанию Samba DC хранит ID пользователей/групп в атрибутах <code>xidNumber</code> в <code>idmap.ldb</code>; из-за особенностей работы <code>idmap.ldb</code> нельзя гарантировать одинаковые ID на разных DC.</p>
+</li>
+<li>
+<p><code>idmap.ldb</code> синхронизируют с DC-держателя FSMO-роли PDC_Emulator на все остальные DC — иначе на каждом DC будут разные ID. Синхронизацию выполняют при первом join нового DC и затем регулярно (не при каждой синхронизации SysVol, но периодически).</p>
+</li>
+<li>
+<p>Процедура:</p>
+<ol>
+<li>Создать hot-backup файла <code>/usr/local/samba/private/idmap.ldb</code> на существующем DC:</li>
+</ol>
+</li>
+</ul>
+<pre><code class="language-bash"># tdbbackup -s .bak /usr/local/samba/private/idmap.ldb
+</code></pre>
+<pre><code> Будет создан файл `/usr/local/samba/private/idmap.ldb.bak`.
+</code></pre>
+<ol start="2">
+<li>Перенести файл бэкапа в папку <code>/usr/local/samba/private/</code> на новом DC и убрать суффикс <code>.bak</code>, заменив существующий файл.</li>
+<li>Выполнить <code>net cache flush</code> на новом DC.</li>
+<li>Синхронизировать Sysvol на новый DC.</li>
+<li>Сбросить ACL файловой системы на папке Sysvol нового DC:</li>
+</ol>
+<pre><code class="language-bash"># samba-tool ntacl sysvolreset
+</code></pre>
+<h3>Проверка репликации каталога</h3>
+<ul>
+<li>После запуска DC проверяющий согласованность (KCC, knowledge consistency checker) создаёт репликационные соглашения с другими DC леса; на создание автогенерируемых репликационных соединений может уйти до 15 минут. Подробности проверки статусов — Verifying the Directory Replication Statuses.</li>
+<li>Для оптимизации задержек и стоимости репликации KCC в Samba 4.5 и новее больше не строит полносвязную (fully-meshed) топологию между всеми DC (см. The Samba KCC).</li>
+<li>Перед запуском BIND-демона убедиться, что DNS-партиции каталога успешно реплицированы:</li>
+</ul>
+<pre><code class="language-bash"># samba-tool drs showrepl
+...
+==== INBOUND NEIGHBORS ====
+...
+DC=DomainDnsZones,DC=samdom,DC=example,DC=com
+	Default-First-Site-Name\DC1 via RPC
+		DSA object GUID: 4a6bd92a-6612-4b15-aa8c-9ec371e8994f
+		Last attempt @ Thu Sep 24 20:08:45 2015 CEST was successful
+		0 consecutive failure(s).
+		Last success @ Thu Sep 24 20:08:45 2015 CEST
+...
+DC=ForestDnsZones,DC=samdom,DC=example,DC=com
+	Default-First-Site-Name\DC1 via RPC
+		DSA object GUID: 4a6bd92a-6612-4b15-aa8c-9ec371e8994f
+		Last attempt @ Thu Sep 24 20:08:45 2015 CEST was successful
+		0 consecutive failure(s).
+		Last success @ Thu Sep 24 20:08:45 2015 CEST
+</code></pre>
+<ul>
+<li>Если репликация работает корректно — запускать BIND (как запустить службу, см. документацию дистрибутива).</li>
+</ul>
+<h3>Проверка Samba AD DC</h3>
+<ul>
+<li>Файловый сервер — см. раздел «Verifying the File Server» документации по первому DC.</li>
+<li>Локальный DNS-сервер (шаг пропускается, если при join был указан <code>--dns-backend=NONE</code>). Запрос локальному DNS на разрешение имени домена:</li>
+</ul>
+<pre><code class="language-bash"># host -t A samdom.example.com localhost
+Using domain server:
+Name: localhost
+Address: 127.0.0.1#53
+Aliases:
+
+samdom.example.com has address 10.99.0.1
+samdom.example.com has address 10.99.0.2
+</code></pre>
+<p>Локальный DNS должен разрешать имя домена в IP всех DC. При пустом или ином результате — свериться с документацией и проверить системные логи, логи Samba и (при BIND9_DLZ) логи BIND.</p>
+<ul>
+<li>Kerberos — см. раздел «Verifying Kerberos» документации по первому DC (<a href="%D0%A3%D1%81%D1%82%D0%B0%D0%BD%D0%BE%D0%B2%D0%BA%D0%B0-Samba-AD-DC.html">Установка Samba AD DC</a>).</li>
+<li>Проверка репликации каталога: создайте, например, пользователя на существующем DC и убедитесь, что он автоматически появился на новом DC. Опционально сравните два каталога утилитой <code>ldapcmp</code> (см. <code>samba-tool ldapcmp</code>).</li>
+</ul>
+<h3>Debian/Ubuntu: конфликт с systemd-resolve</h3>
+<p>Если <code>/etc/resolv.conf</code> постоянно перезаписывается, проверьте, не конфликтует ли systemd-resolved. Вывод команды должен содержать только задачу samba; наличие systemd-resolve означает конфликт DNS:</p>
+<pre><code class="language-bash">$ sudo netstat -tupln | grep :53
+ tcp 0 0 127.0.0.53:53 0.0.0.0:* LISTEN 685/systemd-resolve
+ tcp6 0 0 :::53 :::* LISTEN 963/samba: task[dns...
+ udp 0 0 127.0.0.53:53 0.0.0.0:* 685/systemd-resolve...
+ udp6 0 0 :::53 :::* 963/samba: task[dns...
+</code></pre>
+<p>Остановить службу:</p>
+<pre><code class="language-bash">$ sudo systemctl stop systemd-resolved
+</code></pre>
+<p>Отключить её, чтобы при включении питания она не стартовала снова (команда приведена на странице дословно; по смыслу это <code>systemctl disable</code>):</p>
+<pre><code class="language-bash">$ sudo systemctl stop
+</code></pre>
+<p>Удалить ссылки на resolv.conf, чтобы заменить файл своим содержимым:</p>
+<pre><code class="language-bash">$ sudo rm /etc/resolv.conf
+</code></pre>
+<pre><code class="language-bash">$ sudo nano /etc/resolv.conf
+</code></pre>
+<p>Перезапустить Samba (у автора на вторичном DC служба называлась <code>samba4</code>, а не <code>samba-ad-dc</code>, как на первичном):</p>
+<pre><code class="language-bash">$ sudo systemctl restart samba4
+</code></pre>
+<p>Подождать 30 секунд:</p>
+<pre><code class="language-bash">$ sleep 30
+</code></pre>
+<p>Проверить, что systemd-resolve больше не держит порт:</p>
+<pre><code class="language-bash">$ sudo netstat -tulpn | grep :53
+tcp6 0 0 :::53 :::* LISTEN 963/samba: task[dns...
+udp6 0 0 :::53 :::* 963/samba: task[dns...
+</code></pre>
+<p>Проверить DNS — должны вывестись оба (или более) IP контроллеров домена:</p>
+<pre><code class="language-bash">$ host -t A samdom.example.com 127.0.0.1
+</code></pre>
+<h3>Дополнительно (опционально)</h3>
+<ul>
+<li>Настройка Winbindd на Samba AD DC — отдельная страница документации (Configuring Winbindd on a Samba AD DC).</li>
+<li>Использование DC как файлового сервера — см. Using the Domain Controller as a File Server.</li>
+</ul>
+<h2>Подводные камни</h2>
+<ul>
+<li>Не провижиньте компьютер как Samba AD DC, чтобы затем присоединить его к домену — join не сработает; сразу выполняйте <code>samba-tool domain join</code>.</li>
+<li>Join к Windows AD-домену, провиженному как Windows 2003 или ранее, требует доменно-интегрированного DNS с поведением 2008.</li>
+<li>nameserver в <code>/etc/resolv.conf</code> до join должен указывать на другой AD DC, иначе join не выполнится; после join первый nameserver меняют на IP нового DC — не <code>127.0.0.1</code>.</li>
+<li>Внутренний DNS: forwarder не спрашивается при join и не берётся из <code>/etc/resolv.conf</code> — задайте <code>--option=&quot;dns forwarder=forwarder_ipaddress&quot;</code>.</li>
+<li>BIND9_DLZ нужно настроить до запуска службы Samba DC (<a href="BIND9-DLZ-DNS-%D0%B1%D1%8D%D0%BA%D0%B5%D0%BD%D0%B4.html">BIND9 DLZ DNS бэкенд</a>).</li>
+<li>Без синхронизации <code>idmap.ldb</code> ID пользователей и групп будут разными на разных DC; синхронизируют только с держателя роли PDC_Emulator — при первом join и затем периодически.</li>
+<li>SysVol не реплицируется автоматически (нет поддержки DFS-R/FRS); если на других DC больше GPO, чем четыре дефолтных, SysVol обязательно синхронизируют на новый DC, иначе <code>samba-tool ntacl sysvolreset</code> бросит ошибку.</li>
+<li>KCC создаёт репликационные соединения до 15 минут; с Samba 4.5 топология репликации не полносвязная.</li>
+<li>Debian/Ubuntu: systemd-resolved конфликтует с DNS Samba за порт 53; в команде отключения службы на странице, судя по всему, опечатка (<code>sudo systemctl stop</code> без аргумента — по смыслу <code>systemctl disable</code>).</li>
+</ul>
+<h2>Связанные заметки</h2>
+<ul>
+<li><a href="%D0%A3%D1%81%D1%82%D0%B0%D0%BD%D0%BE%D0%B2%D0%BA%D0%B0-Samba-AD-DC.html">Установка Samba AD DC</a></li>
+<li><a href="%D0%A3%D0%BF%D1%80%D0%B0%D0%B2%D0%BB%D0%B5%D0%BD%D0%B8%D0%B5-%D1%81%D0%BB%D1%83%D0%B6%D0%B1%D0%BE%D0%B9-AD-DC.html">Управление службой AD DC</a></li>
+<li><a href="%D0%92%D0%BD%D1%83%D1%82%D1%80%D0%B5%D0%BD%D0%BD%D0%B8%D0%B9-DNS-%D0%B1%D1%8D%D0%BA%D0%B5%D0%BD%D0%B4.html">Внутренний DNS бэкенд</a></li>
+<li><a href="BIND9-DLZ-DNS-%D0%B1%D1%8D%D0%BA%D0%B5%D0%BD%D0%B4.html">BIND9 DLZ DNS бэкенд</a></li>
+<li><a href="%D0%A0%D0%B5%D0%BF%D0%BB%D0%B8%D0%BA%D0%B0%D1%86%D0%B8%D1%8F-SysVol.html">Репликация SysVol</a></li>
+<li><a href="%D0%A1%D0%B8%D0%BD%D1%85%D1%80%D0%BE%D0%BD%D0%B8%D0%B7%D0%B0%D1%86%D0%B8%D1%8F-%D0%B2%D1%80%D0%B5%D0%BC%D0%B5%D0%BD%D0%B8.html">Синхронизация времени</a></li>
+<li><a href="%D0%94%D0%B8%D0%B0%D0%B3%D0%BD%D0%BE%D1%81%D1%82%D0%B8%D0%BA%D0%B0-AD-DC.html">Диагностика AD DC</a></li>
+</ul>
+</main>
+</body>
+</html>

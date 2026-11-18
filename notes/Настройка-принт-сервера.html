@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Настройка Samba в качестве сервера печати</title>
+<link rel="stylesheet" href="../style.css">
+</head>
+<body>
+<nav><a href="../index.html">База знаний Samba AD DC</a></nav>
+<main><h1>Настройка Samba в качестве сервера печати</h1>
+<h2>Суть</h2>
+<p>Страница описывает настройку Samba как сервера печати: клиенты в сети отправляют задания на хост Samba по протоколу SMB — через мастер «Add printer» в Windows, CUPS на Linux-клиенте или сетевой интерфейс печати в macOS. Samba-принт-сервер имитирует поведение Windows-принт-сервера и поддерживает технологию point and print — клиенты автоматически скачивают драйвер принтера с сервера, без локальной установки. Печать строится поверх бэкенда печати (CUPS или LPRng), а для очередей и управления ими дополнительно включается служба spoolssd (в Samba 4.15 и старше — отдельной настройкой, в 4.16 и новее — через новый RPC daemon framework).</p>
+<h2>Ключевое</h2>
+<h3>Требования</h3>
+<ul>
+<li>Для поддержки печати нужен работающий бэкенд печати на UNIX-хосте: CUPS-сервер, LPRng или другие бэкенды, перечисленные в параметре <code>printing</code> man-страницы <code>smb.conf(5)</code>.</li>
+<li>Бэкенд должен работать на локальном хосте; удалённый CUPS-сервер не поддерживается. Задания можно отправлять на удалённый CUPS через его внутренний форвардинг или CUPS-псевдопринтер (см. документацию CUPS).</li>
+<li>Для шаринга всех очередей бэкенда нужна специальная шара <code>[printers]</code> в <code>smb.conf</code>.</li>
+</ul>
+<h3>Проверка поддержки CUPS в Samba</h3>
+<pre><code># smbd -b | grep &quot;HAVE_CUPS&quot;
+HAVE_CUPS
+</code></pre>
+<p>Если вывод другой — проверить зависимости дистрибутива (заголовочные файлы CUPS) и то, как включается поддержка CUPS при сборке.</p>
+<h3>Добавление принтера в бэкенд печати</h3>
+<p><strong>CUPS</strong> — добавить принтер <code>printer_name</code>:</p>
+<pre><code># lpadmin -p printer_name -E -v ipp://printer_name/ipp/port
+</code></pre>
+<p>Для нелокального CUPS-сервера вместо <code>ipp</code> можно использовать URI <code>lpd</code> и <code>smb</code>, например:</p>
+<ul>
+<li><code>lpd://printer_name/queue</code></li>
+<li><code>ipp://printer_name/ipp/port</code></li>
+<li><code>smb://username:password@domain/windows_print_server_host_name/printer_name</code></li>
+</ul>
+<p><strong>LPRng</strong> — добавить строку в <code>/etc/printcap</code>:</p>
+<pre><code>printer_name:sd=/var/spool/lpd/printer_name/:sh:mx=0:mc=0:rm=Printer_DNS_name_or_IP_address
+</code></pre>
+<p>Затем проверить printcap-кэш, каталоги спула и исправить проблемы:</p>
+<pre><code># checkpc -f
+</code></pre>
+<h3>Включение службы spoolssd (Samba 4.15 и старше)</h3>
+<p>Spoolssd интегрирована в <code>smbd</code>. Она поддерживает управление принтерами через MMC, кэширует spool-файлы и позволяет обрабатывать большое количество заданий/принтеров с низкой нагрузкой на CPU. Без spoolssd обработка spoolss идёт в <code>smbd</code> в один поток — при большом потоке заданий служба тормозит, MMC отвалится по таймауту.</p>
+<p>В секцию <code>[global]</code> файла <code>smb.conf</code>:</p>
+<pre><code>rpc_server:spoolss = external
+rpc_daemon:spoolssd = fork
+</code></pre>
+<p>Необязательные параметры стартового поведения (рекомендуется подстроить под себя):</p>
+<pre><code>spoolssd:prefork_min_children = 5           # Minimum number of children
+spoolssd:prefork_max_children = 25          # Maximum number of children
+spoolssd:prefork_spawn_rate = 5             # Start (n) new children if one of the existing children is used
+spoolssd:prefork_max_allowed_clients = 100  # Number of clients a child process should handle
+spoolssd:prefork_child_min_life = 60        # Minimum lifetime of a child process (60 seconds
+                                            # is the minimum, even a lower value has been
+                                            # configured)
+</code></pre>
+<p>Перезапустить Samba: у пакетной сборки — менеджером служб дистрибутива, например <code>systemctl restart smbd</code>; у самособранной — перезапустить демон <code>smbd</code>:</p>
+<pre><code># killall smbd; smbd
+</code></pre>
+<p>Проверить, что spoolssd запущен (число процессов зависит от <code>spoolssd:prefork_*</code>):</p>
+<pre><code># ps axf
+30903 ?        Ss     0:00 /usr/sbin/smbd --daemon --no-process-group
+30917 ?        S      0:00  \_ /usr/sbin/smbd --daemon --no-process-group
+30918 ?        S      0:00      \_ /usr/sbin/smbd --daemon --no-process-group
+30919 ?        S      0:00      \_ /usr/sbin/smbd --daemon --no-process-group
+30920 ?        S      0:00      \_ /usr/sbin/smbd --daemon --no-process-group
+30921 ?        S      0:00      \_ /usr/sbin/smbd --daemon --no-process-group
+30922 ?        S      0:00      \_ /usr/sbin/smbd --daemon --no-process-group
+30923 ?        S      0:00      \_ /usr/sbin/smbd --daemon --no-process-group
+30924 ?        S      0:00      \_ /usr/sbin/smbd --daemon --no-process-group
+30925 ?        S      0:00      \_ /usr/sbin/smbd --daemon --no-process-group
+30926 ?        S      0:00      \_ /usr/sbin/smbd --daemon --no-process-group
+30927 ?        S      0:00      \_ /usr/sbin/smbd --daemon --no-process-group
+</code></pre>
+<h3>spoolssd в Samba 4.16 и новее</h3>
+<p>Служба работает в новом RPC daemon framework и больше не является пулом prefork-процессов. Поведение настраивается так:</p>
+<pre><code>rpcd_spoolss:idle_seconds=300 # Controls how long an idle rpcd_spoolss process is kept
+rpcd_spoolss:num_workers = 10 # Controls how many rpcd_spoolss processes are available
+</code></pre>
+<p>Значения по умолчанию:</p>
+<pre><code>rpcd_spoolss:idle_seconds = 60
+rpcd_spoolss:num_workers = 5
+</code></pre>
+<p><code>idle_seconds</code> — от 10 до 300, <code>num_workers</code> — от 1 до 100.</p>
+<h3>Включение принт-сервера: шара [printers]</h3>
+<p>Чтобы расшарить все принтеры бэкенда, добавьте специальную шару <code>[printers]</code>:</p>
+<pre><code>[printers]
+ path = /var/tmp/
+ printable = yes
+</code></pre>
+<p>После правки <code>smb.conf</code> перечитать конфигурацию (при неверных значениях/параметрах Samba не сможет перечитать конфиг):</p>
+<pre><code># smbcontrol all reload-config
+</code></pre>
+<p>При <code>printing = CUPS</code> в <code>[global]</code> все принтеры из бэкенда CUPS расшариваются в Samba автоматически.</p>
+<h3>Ручной шаринг отдельного принтера</h3>
+<p>Чтобы расшарить только один принтер:</p>
+<pre><code>[Samba_printer_name]
+ path = /var/tmp/
+ printable = yes
+ printer name = printer_name_in_the_back_end
+</code></pre>
+<p>Параметр <code>printer name</code> задаёт имя принтера в бэкенде печати. Затем перечитать конфигурацию:</p>
+<pre><code># smbcontrol all reload-config
+</code></pre>
+<h3>Принт-сервер на члене домена и standalone-сервере</h3>
+<p>На домен-члене (<a href="Samba-%D0%BA%D0%B0%D0%BA-%D1%87%D0%BB%D0%B5%D0%BD-%D0%B4%D0%BE%D0%BC%D0%B5%D0%BD%D0%B0.html">Samba как член домена</a>) или standalone-сервере при ручном шаринге принтеров дополнительно отключить автозагрузку принтеров из бэкенда:</p>
+<pre><code>load printers = no
+</code></pre>
+<p>На AD DC это не требуется — параметр там игнорируется.</p>
+<h3>Раздача драйверов Windows-клиентам</h3>
+<p>Начиная с Windows 11 22H2 и Windows Server 2022, Windows по умолчанию пытается подключаться к принт-серверу только через шифрованный RPC-канал (NCALRPC с уровнем «Packet Privacy») и при отказе соединение рвёт. Дефолтная конфигурация Samba разрешает любой уровень шифрования RPC, а в некоторых дистрибутивах (например, Debian и Ubuntu) шифрование для всех RPC-соединений по умолчанию отключено — Windows-клиенты к таким принт-серверам не подключаются.</p>
+<p>Принудительное шифрование на сервере:</p>
+<pre><code>[global]
+	rpc server dynamic port range = 49152-65535
+	rpc start on demand support = no
+	rpc server ports = 49152-65535
+
+	rpc servers = rpcecho, epmapper, winreg, srvsvc, netlogon, samr, lsarpc, drsuapi, dssetup, unixinfo, browser, eventlog6, backupkey, dnsserver
+
+	raw tcp provider = rpcecho
+	remote activation support = yes
+
+	# Global settings
+	rpc auth type = Kerberos
+	rpc server context timeout = 30
+	rpc server accept encryption = yes
+	rpc server require encryption = yes
+
+	# make sure we use SMB signing/encryption
+	server signing = required
+	server encryption = required
+</code></pre>
+<p>Принудительное шифрование на клиенте — через реестр:</p>
+<pre><code>reg add &quot;HKLM\SYSTEM\CurrentControlSet\Control\Print&quot; /v RpcAuthnLevelPrivacyEnabled /t REG_DWORD /d 1 /f
+</code></pre>
+<p>или</p>
+<pre><code>reg add &quot;HKLM\Software\Policies\Microsoft\Windows NT\Printers\RPC&quot; /v RpcUseProtSeq /t REG_SZ /d 1 /f
+reg add &quot;HKLM\Software\Policies\Microsoft\Windows NT\Printers\RPC&quot; /v RpcAuthenticationLevel /t REG_SZ /d 1 /f
+</code></pre>
+<p>Автоматическая раздача драйверов (point and print) описана на отдельной странице вики — Setting up Automatic Printer Driver Downloads for Windows Clients.</p>
+<h2>Подводные камни</h2>
+<ul>
+<li>Бэкенд печати обязан работать на локальном хосте — удалённый CUPS-сервер напрямую не поддерживается (только пересылка заданий средствами CUPS или через CUPS-псевдопринтер).</li>
+<li>Инструкция по включению spoolssd (<code>rpc_server:spoolss = external</code>, <code>rpc_daemon:spoolssd = fork</code>) — только для Samba 4.15 и старше; в 4.16+ служба живёт в новом RPC daemon framework и настраивается параметрами <code>rpcd_spoolss:*</code>.</li>
+<li>Шара <code>[printers]</code> требует установки <code>path</code> и <code>printable</code>; <code>path</code> — это каталог спула, и он должен быть доступен на запись всем пользователям, которые печатают.</li>
+<li>Если в <code>smb.conf</code> есть неверные значения или параметры, Samba не сможет перечитать конфигурацию.</li>
+<li>Windows 11 22H2 / Windows Server 2022 и новее по умолчанию требуют шифрованный RPC к принт-серверу и «настойчиво» рвут нешифрованные соединения; в Debian/Ubuntu шифрование RPC отключено по умолчанию — клиенты к такому принт-серверу не подключатся (см. серверные и клиентские фиксы выше).</li>
+<li>На члене домена/standalone при ручном шаринге принтеров обязательно <code>load printers = no</code>; на AD DC параметр игнорируется, ставить его там не нужно.</li>
+</ul>
+<h2>Связанные заметки</h2>
+<ul>
+<li><a href="Samba-%D0%BA%D0%B0%D0%BA-%D1%87%D0%BB%D0%B5%D0%BD-%D0%B4%D0%BE%D0%BC%D0%B5%D0%BD%D0%B0.html">Samba как член домена</a></li>
+<li><a href="%D0%A3%D1%81%D1%82%D0%B0%D0%BD%D0%BE%D0%B2%D0%BA%D0%B0-Samba-AD-DC.html">Установка Samba AD DC</a></li>
+<li><a href="%D0%9E%D0%B1%D1%89%D0%B8%D0%B9-%D1%80%D0%B5%D1%81%D1%83%D1%80%D1%81-%D1%81-Windows-ACL.html">Общий ресурс с Windows ACL</a></li>
+<li><a href="%D0%A3%D0%BF%D1%80%D0%B0%D0%B2%D0%BB%D0%B5%D0%BD%D0%B8%D0%B5-%D1%81%D0%BB%D1%83%D0%B6%D0%B1%D0%BE%D0%B9-AD-DC.html">Управление службой AD DC</a></li>
+<li><a href="%D0%94%D0%B8%D0%B0%D0%B3%D0%BD%D0%BE%D1%81%D1%82%D0%B8%D0%BA%D0%B0-AD-DC.html">Диагностика AD DC</a></li>
+</ul>
+</main>
+</body>
+</html>

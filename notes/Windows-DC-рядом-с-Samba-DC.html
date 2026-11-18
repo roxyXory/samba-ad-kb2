@@ -1,0 +1,230 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Windows DC рядом с Samba DC: совместимость, adprep и функциональные уровни</title>
+<link rel="stylesheet" href="../style.css">
+</head>
+<body>
+<nav><a href="../index.html">База знаний Samba AD DC</a></nav>
+<main><h1>Windows DC рядом с Samba DC: совместимость, adprep и функциональные уровни</h1>
+<h2>Суть</h2>
+<p>Смешанный домен (Windows DC + Samba DC) упирается в три независимых понятия: <strong>уровень схемы</strong> (какие объекты вообще можно создать), <strong>уровень подготовки</strong> (preparation — какие объекты реально созданы) и <strong>функциональный уровень</strong> (число, по которому DC меняют поведение). Windows 2008/2008 R2 DC входит в домен Samba без всякой подготовки; для 2012/2012 R2 нужны схема 2012 R2 плюс <code>samba-tool domain functionalprep</code>, но сам функциональный уровень домена при этом остаётся ниже 2012 (иначе ломается репликация). Для Windows 2016 и новее инфраструктура не готова — остаётся обход через промежуточный 2008 R2 DC, который даёт adprep обновить домен. Обратный вход (Samba DC в Windows-домен) работает до функционального уровня 2008 R2 включительно; на 2012+ join падает с <code>WERR_DS_INCOMPATIBLE_VERSION</code>.</p>
+<h2>Ключевое</h2>
+<h3>Три уровня, которые обычно путают</h3>
+<p>Страница «Windows 2012 Server compatibility» (ред. 13.04.2021) разделяет:</p>
+<ul>
+<li><strong>Schema level</strong> — описывает, какие классы и атрибуты существуют. Обновление схемы обратно совместимо: схема 2012 R2 работает и на 2008 DC. Windows не позволяет обратного — новый DC (2012 R2) в старом домене (2008 R2) требует сначала поднять схему домена; <strong>Samba такого требования при входе в Windows-домен не имеет</strong>.</li>
+<li><strong>Preparation level</strong> — реальное создание объектов, нужных новому функциональному уровню. Пример: схема 2008 R2 добавила объект <code>msDS-PasswordSettingsContainer</code> (PSO), но пока preparation не создаст <code>CN=Password Settings Container</code>, PSO не работает.</li>
+<li><strong>Functional level</strong> — просто число в каталоге, по которому DC меняют поведение. Вся работа делается заранее (схемой и подготовкой) либо переключается на лету по этому числу.</li>
+</ul>
+<p>На Windows все три вопроса решает <code>adprep.exe</code>; с 2012+ он запускается автоматически при повышении DC. <strong>И сам adprep, и новые способы его вызова несовместимы с Samba</strong> — отсюда обход ниже.</p>
+<p>Схемы Windows (страница «AD Schema Version Support», ред. 11.09.2025): 2000 — 13, 2003 — 30, 2003 R2 — 31, 2008 — 44, 2008 R2 — 47, 2012 — 56, 2012 R2 — 69, 2016 — 87, 2019/2022 — 88, 2025 — 91. Samba поддерживает: 4.0–4.4 — 47, 4.5–4.10 — 69 (экспериментально), 4.11–4.18 — 69, <strong>4.19 и новее — 88</strong>.</p>
+<h3>Как проверить уровень схемы</h3>
+<p>На Samba DC (подставить свой домен вместо <code>dc=samdom,dc=example,dc=com</code>):</p>
+<pre><code># ldbsearch -H /usr/local/samba/private/sam.ldb -b 'cn=Schema,cn=Configuration,dc=samdom,dc=example,dc=com' -s base objectVersion
+# record 1
+dn: CN=Schema,CN=Configuration,DC=samdom,DC=example,DC=com
+objectVersion: 47
+</code></pre>
+<p>Из Windows: <code>dsquery * &quot;cn=Schema,cn=Configuration,dc=samdom,dc=example,dc=com&quot; -scope base -attr objectversion</code> или в PowerShell <code>Get-ADObject (Get-ADRootDSE).schemaNamingContext -properties objectVersion</code>.</p>
+<h3>Матрица совместимости DC ↔ домен</h3>
+<p>Из «Windows 2012 Server compatibility» (строки — присоединяемый DC, столбцы — функциональный уровень домена):</p>
+<table>
+<thead>
+<tr>
+<th>DC \ Уровень домена</th>
+<th>Win2008 R2</th>
+<th>Win2012 R2</th>
+<th>Win2016</th>
+<th>Samba</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Win2008 R2</td>
+<td>—</td>
+<td>OK</td>
+<td>OK</td>
+<td>OK</td>
+</tr>
+<tr>
+<td>Win2012 R2</td>
+<td>OK*</td>
+<td>—</td>
+<td>OK</td>
+<td>OK*</td>
+</tr>
+<tr>
+<td>Win2016</td>
+<td>OK*</td>
+<td>OK*</td>
+<td>—</td>
+<td>Not supported</td>
+</tr>
+<tr>
+<td>Samba</td>
+<td>OK</td>
+<td>Not supported</td>
+<td>Not supported</td>
+<td>—</td>
+</tr>
+</tbody>
+</table>
+<p>* Требуется предварительно поднять уровень схемы <strong>и</strong> уровень подготовки домена.</p>
+<h3>Windows 2008 / 2008 R2 DC → домен Samba</h3>
+<p>«This should work without any special preparation». Отдельная страница описывает вход через <code>dcpromo.exe</code> (Existing forest → Add a domain controller to an existing domain), с проверкой времени (Kerberos: расхождение больше 5 минут по умолчанию недопустимо), статическим IP и DNS, указывающим на DC, который резолвит AD-зону. После повышения обязательно проверить, что DC-записи DNS созданы, — «Do not continue without verifying the DNS records. They must exist for a working directory replication!».</p>
+<h3>Windows 2012 / 2012 R2 DC → домен Samba</h3>
+<p>Работает, но не «из коробки»:</p>
+<ul>
+<li>Samba поддерживает схему 47, 56 и 69; с Samba 4.11 поддержка схемы 69 больше не экспериментальна, но поддержка самих Windows Server 2012/2012 R2 как DC, возможно, всё ещё экспериментальна («Please report bugs and incompatibilites»).</li>
+<li>Нужны уровень схемы 2012 R2 <strong>и</strong> уровень подготовки. С v4.11 дефолтная схема — уже 2012 R2, поэтому для домена, созданного на 4.11+, остаётся только шаг подготовки. Для домена, созданного до 4.11, сначала обновляют схему:</li>
+</ul>
+<pre><code>samba-tool domain schemaupgrade
+samba-tool domain functionalprep --function-level=[2012|2012_R2]
+</code></pre>
+<ul>
+<li>Команда <code>schemaupgrade</code> существует с v4.8, но на странице рекомендуется сначала обновиться до v4.11 — «important fixes were added in v4.11». Про <code>schemaupgrade</code> сказано: «This tool may error out when a live server is running, but it has actually succeeded. There is also a bug in 4.11.0rc1 in the LDAP server preventing the actual Windows domain join.»</li>
+<li><code>schemaupgrade</code> и <code>functionalprep</code> достаточно выполнить <strong>на одном DC</strong> — изменения разойдутся репликацией.</li>
+<li>Требования: все Samba DC — 4.6 или новее; Windows Server 2008/2008 R2, с которого идёт начальная репликация, <strong>должен отдавать шару Sysvol</strong>, иначе join 2012/2012 R2 падает.</li>
+<li>Перед повышением первого Windows Server 2012/2012 R2 в DC домена роли <strong>Schema Master, Infrastructure Master и PDC Emulator</strong> должны принадлежать существующему Windows DC 2008/2008 R2. «Forest and domain preparation fails if a Samba DC holds one to three of the previous mentioned roles when you join the first Windows Server 2012 or 2012 R2 DC.» После обновления роли можно вернуть на Samba DC.</li>
+<li>В мастере повышения источником репликации нужно выбрать существующий Windows DC: «Samba currently does not support schema replication using the Windows management instrumentation (WMI) protocol.»</li>
+</ul>
+<p><strong>Важное предупреждение (страница join 2012/2012 R2, ред. 19.07.2023):</strong> «Joining a Windows Server 2012 or 2012 R2 DC to a Samba AD with 2012R2 functional level breaks the AD replication! Do not use this documentation until the problem is fixed! For more details, see Bug #13618. Thankfully Windows 2012 can join a down-level (2008/2008R2) domain, just not at Functional Level 2012/2012R2, provided the schema is updated, which samba can do.» То есть схему/подготовку поднимают до 2012 R2, а функциональный уровень домена оставляют 2008/2008 R2.</p>
+<h3>Windows 2016 и новее → домен Samba: обход через adprep</h3>
+<p>Статус на странице совместимости (ред. 2021): «Not yet complete. All the infrastructure is in place, but the work needs to be done/funded. This may still be possible using the adprep workaround.»</p>
+<p>Обход (дословно из раздела «adprep workaround»):</p>
+<ol>
+<li>A 2008R2 version of Windows is joined to Samba.</li>
+<li>All the FSMO roles are transferred to the Windows 2008R2 DC.</li>
+<li>The Windows 2012 DC joins the 2008R2 DC and adprep automatically updates the domain's schema and preparation levels.</li>
+<li>The 2008R2 DC can now be removed and/or FSMO roles transferred back to Samba.</li>
+</ol>
+<p>Смысл в том, что adprep не работает напрямую против Samba DC, но может обновить промежуточный Windows DC — обновлённая база домена затем реплицируется и на Samba DC. Функциональный уровень домена при этом не меняется («note that the domain's functional level remains unchanged»).</p>
+<h3>Samba DC → Windows-домен</h3>
+<ul>
+<li><strong>Pre-2008 R2.</strong> В целом возможно, но с оговорками. Samba поддерживает обновление схемы только начиная с доменов 2008 R2; если домен создавался Windows DC старее 2008 R2, <code>samba-tool</code> схему не обновит. Шаги переезда с Windows (подъём схемы и подготовки штатным adprep до вывода Windows DC) описаны в <a href="%D0%9C%D0%B8%D0%B3%D1%80%D0%B0%D1%86%D0%B8%D1%8F-NT4-%D0%B4%D0%BE%D0%BC%D0%B5%D0%BD%D0%B0-%D0%B2-Samba-AD.html">Миграция NT4 домена в Samba AD</a>.</li>
+<li><strong>Pre-2003.</strong> Проблема в том, что DNS-записи ещё лежат в основном разделе, а не в <code>DC=DomainDNSZones</code>. Перед входом Samba DC нужно поднять функциональный уровень до 2003 и перенести DNS-записи в <code>DC=DomainDNSZones</code> и <code>DC=ForestDNSZones</code>; «If you have not migrated the DNS entries first, then joining the Samba DC will fail». Страница «Joining a Samba DC to an Existing Active Directory» формулирует это так: если домен создавался Windows 2003 (или раньше), DNS-сервер должен быть domain integrated и настроен на поведение 2008.</li>
+<li><strong>2008 / 2008 R2.</strong> «Generally speaking, this should work» — стабильные версии входят без проблем; известен баг 14046 (по странице совместимости — только Samba v4.10, сборка с Python 3; в самом баг-репорте — v4.10 и v4.11/master): join падает с</li>
+</ul>
+<pre><code>DsAddEntry failed with status WERR_ACCESS_DENIED info (8363, 'WERR_DS_NO_CROSSREF_FOR_NC')
+</code></pre>
+<p>Обходной путь для 4.10 — запустить samba-tool под python2 (при наличии python2-пакетов Samba).</p>
+<ul>
+<li><strong>2012 и выше.</strong> Невозможно: потребовалась бы реализация функционального уровня 2012. Join даёт ошибку</li>
+</ul>
+<pre><code>DsAddEntry failed with status WERR_ACCESS_DENIED info (8567, 'WERR_DS_INCOMPATIBLE_VERSION')
+</code></pre>
+<p>Рекомендация страницы — понизить функциональный уровень леса и домена на Windows DC до 2008 R2 и отключить связанные функции 2012, прежде чем присоединять Samba. Запрос на поддержку join на уровне 2012R2 — bug 13619; в 2023 году он помечен RESOLVED FIXED, в комментарии разработчика (22.05.2023) сказано, что коммит <code>72335e742e041ea213598a62ae165edeed4b8c99</code> «allows Samba to claim to be Windows 2016 at join time», но недостающие функции уровня не доделаны, а пользоваться этим можно «as long as you understand the risks».</p>
+<h3>FSMO-роли в Samba: что реализовано</h3>
+<p>Из раздела «FSMO roles» страницы совместимости:</p>
+<ul>
+<li><strong>Schema master</strong> — обрабатывается, но часть компонентов Windows предполагает, что schema master работает под Windows; из-за этого adprep и обновление схемы против Samba не работают. Обновлять схему нужно инструментами Samba против Samba schema master и инструментами Windows против Windows schema master.</li>
+<li><strong>Domain naming master</strong> — «Currently no behaviour is implemented in regards to this role in Samba»; создание разделов не работает или работает частично.</li>
+<li><strong>PDC emulator</strong> — большая часть функциональности реализована на уровне 2008 R2, но «we currently do not implement certain aspects of authentication and password changes (including urgent replication)». Проблема не в самом PDC, а в том, что остальные DC Samba не уважают PDC emulator: репликация должна распространиться естественным путём, прежде чем заработает часть логинов.</li>
+<li><strong>RID master</strong> — реализован (преаллокация RID).</li>
+<li><strong>Infrastructure master</strong> (домен + domain DNS + forest DNS) — «Currently no behaviour appears to be implemented for these roles in Samba»; именно эта роль отвечает за часть кросс-ссылок и recycle bin, которых в Samba тоже нет.</li>
+</ul>
+<h3>Чего нет в Samba (по состоянию страницы, ред. 2021)</h3>
+<ul>
+<li>Уровень 2008 R2: Recycle Bin, DFSR (репликация Sysvol), частичная поддержка доверий/леса, DCOM/WMI (и связанные DCE/RPC-пайпы), ADWS / совместимость с AD PowerShell.</li>
+<li>Уровень 2012/2012 R2: group managed service accounts, новые возможности Kerberos (claims based access control, authentication policy silos, FAST armoring).</li>
+<li>Уровень 2016: temporary (time-limited) group memberships.</li>
+<li>Доверительные отношения: «Samba still has a number of limitations to its trusted domain support. In a mixed environment, expect Samba to allow or disallow operations differently from Windows». Плюс: «In Samba, trust support isn't yet complete and so in general terms, the domain is often considered the forest».</li>
+</ul>
+<p><strong>Расхождения по версиям (проверять по release notes, страница устарела):</strong></p>
+<ul>
+<li>Samba 4.19: «An initial, partial implementation of Active Directory Functional Level 2012, 2012R2 and 2016 is available in this release»; Kerberos Armoring (FAST) для Windows-клиентов работает, если функциональный уровень DC выставлен в 2012, 2012_R2 или 2016 (страница 2021 года всё ещё числит FAST среди отсутствующего).</li>
+<li>Samba 4.20: поддержка Authentication Silos и Authentication Policies (нужен функциональный уровень 2012_R2 или выше).</li>
+<li>Samba 4.21: «Samba 4.21 adds support for gMSAs (Group Managed Service Accounts), completing support for Functional Level 2012» и «Samba can now claim Functional Level 2012R2 support».</li>
+</ul>
+<h3>SysVol: реестр на Windows DC и robocopy-обход</h3>
+<p>Windows DC при входе в домен пытается реплицировать содержимое Sysvol, но Samba не поддерживает DFS-R, поэтому содержимое не реплицируется и Windows <strong>не включает шару Sysvol</strong>. Включают вручную: сохранить в файл (например, <code>Win-Create-Sysvol-Share.reg</code>) и импортировать</p>
+<pre><code>Windows Registry Editor Version 5.00
+
+[HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\Netlogon\Parameters]
+
+&quot;SysvolReady&quot;=dword:00000001
+</code></pre>
+<p>и перезагрузить сервер. Это не включает репликацию Sysvol.</p>
+<p>Сама репликация между Samba и Windows DC делается robocopy-обходом (rsync не годится: он не сохраняет ACL между Linux и Windows): задача в Task Scheduler, каждые 5 минут, запуск от доменного администратора, действие</p>
+<pre><code>Program/script:               C:\Windows\System32\Robocopy.exe
+Add arguments (optional):     \\DC1\SYSVOL\samdom.example.com\ C:\Windows\SYSVOL\domain\ /mir /sec
+</code></pre>
+<p>плюс перезапуск службы File Replication Service. Источник — Samba DC (рекомендуется PDC Emulator, к нему по умолчанию подключается GPMC). Репликация односторонняя: правки GPO/скриптов делают только на источнике, на остальных DC они будут перезаписаны. Подробнее — <a href="%D0%A0%D0%B5%D0%BF%D0%BB%D0%B8%D0%BA%D0%B0%D1%86%D0%B8%D1%8F-SysVol.html">Репликация SysVol</a>.</p>
+<p>Если после входа Windows DC шары «SysVol» и «Netlogon» не видно, страница отсылает к KB947022.</p>
+<h3>Подъём функционального уровня</h3>
+<p>Здесь источники расходятся, и расхождение принципиальное:</p>
+<ul>
+<li><strong>Страница «Windows 2012 Server compatibility» (ред. 2021):</strong> «Samba does not currently support any attempts to update the functional level» и «The samba-tool command to raise your functional level is not safe to use against Samba (and probably not even safe against Windows either). The tool is currently incomplete in that it does not check for the appropriate schema version or preparation level before deciding to change the functional level. Please do not run this! If changing the functional level is necessary, using Windows to perform the change is required.»</li>
+<li><strong>Страница «Raising the Functional Levels» (ред. 14.06.2024):</strong> уровни выставляются через <code>samba-tool</code>. Таблица поддержки: 2016 — Samba 4.20 и новее, 2012_R2 — 4.19 и новее, 2012 — 4.19 и новее, 2008_R2/2008/2003 — 4.0 и новее. После подъёма любого уровня «you will need to restart the Samba AD DC(s)».</li>
+</ul>
+<pre><code># samba-tool domain level raise --domain-level=2008_R2
+# samba-tool domain level raise --forest-level=2012_R2
+</code></pre>
+<p>Функциональный уровень леса нельзя поднять выше уровня домена («You can not set the forest functional level higher than the domain functional level»). Подъём из оснастки Windows «Active Directory Domains and Trusts» не поддерживается (в источнике: «Raising the domain functional level using the Active Directory Domains and Trusts utility is currently not supported») — см. bug 10360; при этом страница всё равно приводит шаги для этой оснастки, то есть противоречит сама себе.</p>
+<ul>
+<li><strong>Официальный рецепт для 2016 (release notes 4.19.0):</strong> на каждом DC в <code>smb.conf</code> добавить</li>
+</ul>
+<pre><code> ad dc functional level = 2016
+</code></pre>
+<p>перезапустить Samba и выполнить</p>
+<pre><code>samba-tool domain schemaupgrade --schema=2019
+samba-tool domain functionalprep --function-level=2016
+samba-tool domain level raise --domain-level=2016 --forest-level=2016
+</code></pre>
+<p>Для нового домена — <code>samba-tool provision</code> с <code>--option=&quot;ad dc functional level = 2016&quot; --function-level=2016</code>. В 4.19 Samba всё ещё даёт по умолчанию только FL 2008 R2, но база нового домена готовится под FL 2016 — release notes 4.19.0: «in provision ensure that the blank database is already prepared for Functional Level 2016, with AD Schema 2019». В release notes 4.21 схема при этом названа «default 2016 schema» («Provided the default 2016 schema is used, new Samba domains provisioned with Samba 4.21 will have this enabled once the domain functional level is set to 2016») — формулировки источников расходятся (2019 против 2016). Фактическое умолчание <code>samba-tool domain provision</code> — схема <strong>2019</strong>: в <code>python/samba/netcmd/domain/provision.py</code> тегов 4.19.0–4.21.0 у опции <code>--base-schema</code> перечислены <code>2008_R2|2008_R2_old|2012|2012_R2|2016|2019</code> с умолчанием «Default is (Windows) 2019» (локальная проверка на 4.22.11 даёт то же), а схему готового домена можно проверить через <code>objectVersion</code> (см. раздел «Как проверить уровень схемы» выше). Домены, обновлённые со старых версий, ротацию паролей smartcard-only аккаунтов не получат «even after the functional level preparation, matching the behaviour of upgraded Windows AD domains».</p>
+<ul>
+<li><strong><code>ad dc functional level</code> (smb.conf, man current):</strong> «the Active Directory functional level that this Domain Controller will claim to support», значения 2008_R2/2012/2012_R2/2016, по умолчанию <code>2008_R2</code>. «Normally this option should not be set as Samba will operate per the released functionality of the Samba Active Directory Domain Controller.» Если выставить вручную, «the protection against mismatching features between domain controllers is reduced, so all domain controllers should be running the same version of Samba».</li>
+</ul>
+<h2>Подводные камни</h2>
+<ul>
+<li><strong>Не поднимайте функциональный уровень домена до 2012/2012_R2, если рядом Windows DC 2012/2012 R2</strong> — по предупреждению страницы join это ломает репликацию AD (bug 13618). Поднимать нужно только схему и подготовку, а функциональный уровень оставлять 2008/2008 R2.</li>
+<li><strong><code>samba-tool domain functionalprep</code> на работающем DC падает с <code>INTERNAL ERROR: Signal 11</code></strong> (bug 13705, «samba-tool domain functionalprep: Segmentation fault», статус NEW). Разработчик поясняет: «The functional prep command actually succeeds in this case, but for some reason it's crashing in the messaging code with a live server». Ошибка ложная, но и безобидной её считать нельзя: в 4.14.5 баг воспроизводился, а автотесты его не ловят, потому что там Samba не запущена. Смежный факт со страницы совместимости: <code>schemaupgrade</code> «may error out when a live server is running, but it has actually succeeded».</li>
+<li><strong>adprep не работает против Samba DC.</strong> Любое обновление схемы/подготовки через Windows — только против промежуточного Windows DC, иначе шаг провалится. Для этого промежуточному DC нужны роли Schema Master, Infrastructure Master и PDC Emulator (<a href="%D0%9F%D0%B5%D1%80%D0%B5%D0%B4%D0%B0%D1%87%D0%B0-%D0%B8-%D0%B7%D0%B0%D1%85%D0%B2%D0%B0%D1%82-FSMO-%D1%80%D0%BE%D0%BB%D0%B5%D0%B9.html">Передача и захват FSMO ролей</a>).</li>
+<li><strong>Windows GUI не поднимет функциональный уровень на Samba DC</strong>: «AD Domains and Trusts» отвечает «Not sufficiant privileges to raise the forest functional level» (и то же самое для domain functional level) — bug 10360, статус NEW с 2014 года, воспроизводился и в 4.6.0rc3; при этом samba-tool делает это без проблем. Утверждение страницы 2021 года о том, что менять уровень нужно только из Windows, устарело: для Samba DC всё наоборот, а уровень 2012_R2/2016 через samba-tool заявлен с 4.19/4.20.</li>
+<li><strong>Обновление схемы Samba — только с домена 2008 R2.</strong> Для более старых домов придётся вручную применять ldf-файлы из Windows adprep: «the ldf files must be manually sourced from the Windows adprep tool and run with the --ldf-file= option».</li>
+<li><strong>Ошибка «This operation is only allowed for the Primary Domain Controller of the domain»</strong> при повышении Windows DC означает, что он не смог обратиться к Sysvol партнёра репликации (Windows Server 2008/2008 R2) — лечится включением шары Sysvol.</li>
+<li><strong>WMI-репликация схемы не поддерживается</strong> — в мастере повышения Windows DC выбирайте источником существующий Windows DC, иначе шаг репликации схемы не пройдёт.</li>
+<li><strong>Без шары Sysvol на партнёре join Windows 2012/2012 R2 падает</strong> — сначала включают шару на 2008/2008 R2 DC.</li>
+<li><strong>PDC emulator без urgent replication</strong>: смена пароля и часть аутентификации не форвардятся на PDC, репликация должна дойти естественным путём — логин с новым паролем может не работать сразу на всех DC.</li>
+<li><strong>Domain naming master и infrastructure master не реализованы</strong> — не полагайтесь на них в смешанном домене; recycle bin и часть кросс-ссылок отсутствуют.</li>
+<li><strong>Неполные доверия</strong>: в смешанной среде Samba может разрешать/запрещать операции не так, как Windows; домен в Samba фактически приравнивается к лесу.</li>
+<li><strong>Robocopy-репликация SysVol односторонняя, а флаг <code>/mir</code> зеркалирует каталог</strong>: локальные правки GPO на Windows DC будут перезаписаны содержимым источника.</li>
+<li><strong>Страница «Windows 2012 Server compatibility» не обновлялась с 13.04.2021</strong> — её списки отсутствующих функций и оценок «not supported» могут быть устаревшими (см. release notes 4.19–4.21); перед выводами сверяйтесь с текущими release notes и man-страницами.</li>
+</ul>
+<h2>Источники</h2>
+<ul>
+<li>https://wiki.samba.org/index.php/Windows_2012_Server_compatibility — главный источник: три уровня, матрица совместимости, adprep-обход, FSMO-статусы, список отсутствующих функций, ошибки <code>WERR_DS_INCOMPATIBLE_VERSION</code> / <code>WERR_DS_NO_CROSSREF_FOR_NC</code>, pre-2003 DNS-зоны.</li>
+<li>https://wiki.samba.org/index.php/Joining_a_Windows_Server_2012_/_2012_R2_DC_to_a_Samba_AD — требования (Samba ≥ 4.6, шара Sysvol), FSMO на Windows DC, WMI-ограничение, предупреждение о поломке репликации на FL 2012R2, ошибка про PDC.</li>
+<li>https://wiki.samba.org/index.php/Joining_a_Windows_Server_2008_/_2008_R2_DC_to_a_Samba_AD — пошаговый вход 2008/2008 R2 DC через <code>dcpromo.exe</code>, проверка DNS-записей.</li>
+<li>https://wiki.samba.org/index.php/Enabling_the_Sysvol_Share_on_a_Windows_DC — включение шары Sysvol правкой реестра (<code>SysvolReady</code>).</li>
+<li>https://wiki.samba.org/index.php/Raising_the_Functional_Levels — таблица поддерживаемых функциональных уровней по версиям Samba, команды <code>domain level raise</code>, ссылка на bug 10360.</li>
+<li>https://wiki.samba.org/index.php/Robocopy_based_SysVol_replication_workaround — robocopy-обход репликации SysVol, команда и аргументы.</li>
+<li>https://wiki.samba.org/index.php/AD_Schema_Version_Support — таблица версий схем Windows и Samba, команда <code>samba-tool domain schemaupgrade</code>, проверка <code>objectVersion</code> через ldbsearch/dsquery/PowerShell, ограничение «This tool only works from 2008 R2».</li>
+<li>https://wiki.samba.org/index.php/Joining_a_Samba_DC_to_an_Existing_Active_Directory — требование domain integrated DNS с поведением 2008 для доменов 2003 и старее.</li>
+<li>https://bugzilla.samba.org/show_bug.cgi?id=13705 — «samba-tool domain functionalprep: Segmentation fault» (NEW; команда на живом DC падает, но фактически выполняется).</li>
+<li>https://bugzilla.samba.org/show_bug.cgi?id=13618 — «Errors when joining a domain with a 2012R2 functional level» (REOPENED); на неё ссылается предупреждение страницы join.</li>
+<li>https://bugzilla.samba.org/show_bug.cgi?id=13619 — «Win2012R2 Functional level join support» (RESOLVED FIXED, 2023); комментарий о коммите 72335e74 и «claim to be Windows 2016 at join time».</li>
+<li>https://bugzilla.samba.org/show_bug.cgi?id=10360 — «Raising forest/domain functional from Windows: Not sufficiant privileges» (NEW) — оснастка Windows против Samba DC не работает, samba-tool работает.</li>
+<li>https://bugzilla.samba.org/show_bug.cgi?id=14046 — <code>WERR_DS_NO_CROSSREF_FOR_NC</code> при join к домену 2008R2 FL, только 4.10/4.11 с Python 3 (RESOLVED FIXED).</li>
+<li>https://www.samba.org/samba/history/samba-4.11.0.html — «Default schema updated to 2012_R2», команда <code>domain schemaupgrade</code>.</li>
+<li>https://www.samba.org/samba/history/samba-4.19.0.html — частичная реализация FL 2012/2012R2/2016, база новых доменов готовится под FL 2016 со схемой 2019, FAST, рецепт подъёма до 2016.</li>
+<li>https://www.samba.org/samba/history/samba-4.20.0.html — Authentication Silos и Policies (нужен FL 2012_R2 или выше), gMSA client-side.</li>
+<li>https://www.samba.org/samba/history/samba-4.21.0.html — gMSA завершают поддержку FL 2012; «Samba can now claim Functional Level 2012R2 support»; формулировка «default 2016 schema» для новых доменов.</li>
+<li>https://gitlab.com/samba-team/samba/-/blob/samba-4.19.0/python/samba/netcmd/domain/provision.py (и теги samba-4.20.0 / samba-4.21.0, файлы совпадают) — умолчания provision для новых доменов: <code>--base-schema</code> = 2019 («Default is (Windows) 2019»), <code>--function-level</code> = <code>2008_R2</code>.</li>
+<li>https://www.samba.org/samba/docs/current/man-html/samba-tool.8.html — <code>domain schemaupgrade</code> (<code>--schema [2012|2012_R2|2016|2019]</code>, по умолчанию 2019), <code>domain functionalprep</code> (в прозе man-страницы опция названа <code>--functional-level [2008_R2|2012|2012_R2|2016]</code>, по умолчанию 2016, — но реально объявленное имя опции <code>--function-level</code>: проверено на Samba 4.22.11, разбор — в <a href="%D0%9C%D0%B8%D0%B3%D1%80%D0%B0%D1%86%D0%B8%D1%8F-NT4-%D0%B4%D0%BE%D0%BC%D0%B5%D0%BD%D0%B0-%D0%B2-Samba-AD.html">Миграция NT4 домена в Samba AD</a>), <code>domain level show|raise</code>.</li>
+<li>https://www.samba.org/samba/docs/current/man-html/smb.conf.5.html — описание <code>ad dc functional level</code> (значения, дефолт 2008_R2, предупреждение о несовпадении функций между DC).</li>
+</ul>
+<h2>Связанные заметки</h2>
+<ul>
+<li><a href="%D0%9F%D1%80%D0%B8%D1%81%D0%BE%D0%B5%D0%B4%D0%B8%D0%BD%D0%B5%D0%BD%D0%B8%D0%B5-%D0%B2%D1%82%D0%BE%D1%80%D0%BE%D0%B3%D0%BE-DC-%D0%BA-%D0%B4%D0%BE%D0%BC%D0%B5%D0%BD%D1%83.html">Присоединение второго DC к домену</a></li>
+<li><a href="%D0%9F%D0%B5%D1%80%D0%B5%D0%B4%D0%B0%D1%87%D0%B0-%D0%B8-%D0%B7%D0%B0%D1%85%D0%B2%D0%B0%D1%82-FSMO-%D1%80%D0%BE%D0%BB%D0%B5%D0%B9.html">Передача и захват FSMO ролей</a></li>
+<li><a href="%D0%A0%D0%B5%D0%BF%D0%BB%D0%B8%D0%BA%D0%B0%D1%86%D0%B8%D1%8F-SysVol.html">Репликация SysVol</a></li>
+<li><a href="%D0%9E%D0%B1%D0%BD%D0%BE%D0%B2%D0%BB%D0%B5%D0%BD%D0%B8%D0%B5-Samba.html">Обновление Samba</a></li>
+<li><a href="%D0%9F%D0%BE%D0%BD%D0%B8%D0%B6%D0%B5%D0%BD%D0%B8%D0%B5-%D1%80%D0%BE%D0%BB%D0%B8-AD-DC.html">Понижение роли AD DC</a></li>
+</ul>
+</main>
+</body>
+</html>

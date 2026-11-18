@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Обновление Samba</title>
+<link rel="stylesheet" href="../style.css">
+</head>
+<body>
+<nav><a href="../index.html">База знаний Samba AD DC</a></nav>
+<main><h1>Обновление Samba</h1>
+<h2>Суть</h2>
+<p>Страница «Updating Samba» описывает правильный порядок обновления установленного Samba до более новой версии — он одинаков для контроллера домена AD, NT4-style PDC, доменного члена и standalone-установки: остановить службы, сделать резервную копию, прочитать release notes всех пропущенных версий, установить новую версию поверх и запустить те же демоны, что и раньше. Для контроллеров домена добавлены рекомендации по проверке базы AD и осторожности при понижении версии. Отдельный раздел перечисляет заметные изменения в конкретных версиях (4.0.x–4.6.x), о которых нужно знать после обновления, а также развеивает заблуждение, что переход на Samba 4 требует миграции на Active Directory.</p>
+<h2>Ключевое</h2>
+<h3>Общий порядок обновления</h3>
+<p>Действия одинаковы при обновлении Samba AD DC, NT4-style PDC, доменного члена или standalone-установки:</p>
+<ol>
+<li>Остановить все службы Samba (см. <a href="%D0%A3%D0%BF%D1%80%D0%B0%D0%B2%D0%BB%D0%B5%D0%BD%D0%B8%D0%B5-%D1%81%D0%BB%D1%83%D0%B6%D0%B1%D0%BE%D0%B9-AD-DC.html">Управление службой AD DC</a>).</li>
+<li>Создать резервную копию (см. <a href="%D0%A0%D0%B5%D0%B7%D0%B5%D1%80%D0%B2%D0%BD%D0%BE%D0%B5-%D0%BA%D0%BE%D0%BF%D0%B8%D1%80%D0%BE%D0%B2%D0%B0%D0%BD%D0%B8%D0%B5-%D0%B8-%D0%B2%D0%BE%D1%81%D1%81%D1%82%D0%B0%D0%BD%D0%BE%D0%B2%D0%BB%D0%B5%D0%BD%D0%B8%D0%B5-AD-DC.html">Резервное копирование и восстановление AD DC</a>).</li>
+<li>Прочитать release notes всех пропущенных версий — там важные сведения о новых возможностях, изменённых параметрах и исправлениях. При переходе на новый мажорный релиз читают notes начальной версии (x.y.0) и всех минорных до целевой. Пример со страницы: обновление с 4.4.4 до 4.6.2 — читаются notes версий 4.5.0, 4.6.0, 4.6.1 и 4.6.2.</li>
+<li>Установить новейшую версию поверх существующей:
+<ul>
+<li>при сборке из исходников — использовать те же опции <code>configure</code>, что и для предыдущей версии (см. Build Samba From the Sources);</li>
+<li>при обновлении через пакеты — следовать документации дистрибутива.</li>
+</ul>
+</li>
+<li>Запустить те же демоны, что и на предыдущей версии:
+<ul>
+<li>Samba AD DC: <code>samba</code></li>
+<li>Samba NT4-style PDC/BDC: <code>smbd</code>, <code>nmbd</code></li>
+<li>Samba domain member: <code>smbd</code>, <code>nmbd</code>, <code>winbind</code></li>
+<li>Samba standalone: <code>smbd</code></li>
+</ul>
+</li>
+<li>Проверить лог-файлы Samba на ошибки (см. <a href="%D0%94%D0%B8%D0%B0%D0%B3%D0%BD%D0%BE%D1%81%D1%82%D0%B8%D0%BA%D0%B0-AD-DC.html">Диагностика AD DC</a>).</li>
+<li>Протестировать обновлённую установку.</li>
+</ol>
+<h3>Обновление контроллеров домена AD</h3>
+<p>Обновление AD DC может добавить осложнений из-за совместимости баз данных и управления FSMO-ролями. Вики рекомендует:</p>
+<ul>
+<li>Запустить проверку базы данных Samba AD DC (Samba AD DC database check) как часть тестирования обновлённой установки.</li>
+<li>Обратиться к странице «Updating Multiple Samba Domain Controllers» для безопасного раскатывания обновления на сеть контроллеров домена — порядок (сначала DC без FSMO-ролей, держатели ролей в конце, <code>samba-tool drs showrepl</code> после каждого шага) разобран в <a href="%D0%9E%D0%B1%D0%BD%D0%BE%D0%B2%D0%BB%D0%B5%D0%BD%D0%B8%D0%B5-%D0%BD%D0%B5%D1%81%D0%BA%D0%BE%D0%BB%D1%8C%D0%BA%D0%B8%D1%85-DC.html">Обновление нескольких DC</a>.</li>
+<li>Учитывать совместимость базы данных при понижении версии AD DC через границу мажорного релиза.</li>
+</ul>
+<h3>Заблуждения о Samba 4</h3>
+<ul>
+<li>При обновлении до Samba 4 и новее миграция на Active Directory не требуется: поддержка AD DC — лишь одно из нововведений Samba 4.0, а все новые версии включают возможности прежних, в том числе NT4-style (classic) домены. Обновить Samba 3.x PDC можно так же, как раньше обновлялись, например, с 3.4.x до 3.5.x.</li>
+<li>Поддержка создания новых NT4-style PDC сохраняется, но начиная с Samba 4.13.0 часть требуемых SMBv1-параметров объявлена устаревшей — соответственно, устарели и NT4-style домены (удалять их планируется ещё нескоро; команда Samba рекомендует по возможности переходить на AD).</li>
+</ul>
+<h3>Заметные изменения, требующие внимания после обновления</h3>
+<p>Общий совет страницы: всегда читать release notes всех версий между предыдущей и целевой.</p>
+<p><strong>Все режимы установки</strong></p>
+<ul>
+<li><em>Права на исполнение файлов (4.0.0 и новее).</em> Раньше Samba не проверяла x-бит, и файлы (<code>*.exe</code>, <code>*.bat</code>) исполнялись на шаре даже без него. Теперь без x-бита файл не исполнится. Чтобы вернуть прежнее поведение, в отдельных шарах или в секции <code>[global]</code>:<pre><code>acl allow execute always = yes
+</code></pre>
+</li>
+</ul>
+<p><strong>Контроллеры домена AD</strong></p>
+<ul>
+<li><em>Бэкенд ntvfs отключён (4.5.0 и новее).</em> Никогда не поддерживавшийся файловый бэкенд ntvfs больше не собирается по умолчанию; при запуске <code>samba</code> на DC с ntvfs в лог пишется:<pre><code>Failed to start service 'smb' - NT_STATUS_INVALID_SYSTEM_SERVICE
+STATUS=daemon failed to start: Samba failed to start services, error code -1073741796
+</code></pre>
+Решение — мигрировать файловый бэкенд DC на поддерживаемый s3fs (страница «Migrating the ntvfs File Server Back End to s3fs»).</li>
+<li><em>Исправление атрибутов replPropertyMetaData (4.5.0 и новее).</em> До 4.5.0 атрибут <code>replPropertyMetaData</code> хранился неверно (например, конфликты при переименовании). Проверка:<pre><code># samba-tool dbcheck --cross-ncs
+</code></pre>
+Исправление:<pre><code># samba-tool dbcheck --cross-ncs --fix --yes
+</code></pre>
+Проверку и исправление нужно выполнить на всех контроллерах домена (см. «Подводные камни»).</li>
+<li><em>Недоступны шары на DC, если в smb.conf заданы idmap config (4.4.6 и новее).</em> По умолчанию <code>winbindd</code> на DC генерирует ID локально и хранит их в <code>idmap.ldb</code>; раньше параметры <code>idmap config</code> в <code>smb.conf</code> на DC игнорировались, но из-за бага в 4.4.6+ клиенты перестают подключаться к шарам на DC. Решение: удалить все параметры <code>idmap config</code> из <code>smb.conf</code> на DC, перезапустить службу <code>samba</code>, перезапустить клиенты.</li>
+<li><em>Новый умолчальный параметр LDAP требует строгой аутентификации (4.4.1 / 4.3.7 / 4.2.10 и новее).</em> Обновления безопасности ввели опцию <code>ldap server require strong auth</code> со значением по умолчанию <code>yes</code> — разрешены только simple bind по TLS-шифрованному соединению. (4.4.1/4.3.7/4.2.10 — первые сборки с этой опцией: они были выпущены только вендорам и содержали регрессию; публичные security-релизы — 4.4.2/4.3.8/4.2.11. Подробнее — <a href="%D0%A5%D0%B0%D1%80%D0%B4%D0%B5%D0%BD%D0%B8%D0%BD%D0%B3-Samba-AD-DC.html">Харденинг Samba AD DC</a> и <a href="LDAPS-%D0%A1%D0%B5%D1%80%D1%82%D0%B8%D1%84%D0%B8%D0%BA%D0%B0%D1%82%D1%8B-AD-DC.html">LDAPS Сертификаты AD DC</a>.) Внешние LDAP-приложения без TLS получают ошибку:<pre><code>ldap_bind: Strong(er) authentication required (8)
+       additional info: BindSimple: Transport encryption required.
+</code></pre>
+</li>
+<li><em>Очистка базы AD от удалённых LDAP DNS-записей (4.1.12 и новее).</em> Раньше для удалённых DNS-записей некорректно создавались удалённые объекты AD; исправленная версия при старте первого DC удаляет их все, из-за чего возможна временно медленная работа.</li>
+<li><em>Неверные права на TLS-файлы (4.1.2 / 4.0.12 и новее).</em> Раньше <code>*.pem</code>-файлы для LDAP TLS создавались с небезопасными правами. Удалить их на всех DC:<pre><code># rm /usr/local/samba/private/tls/*.pem
+</code></pre>
+После удаления перезапустить Samba — сертификаты будут созданы заново автоматически.</li>
+<li><em>Проблемы динамического обновления DNS (4.0.7 и новее)</em> — см. страницу «Fix DNS dynamic updates in Samba versions prior 4.0.7».</li>
+<li><em>Неверные ACL на Sysvol и каталогах (при обновлении с ранних 4.0.x, 4.0 beta и release candidate).</em> Сброс неверных ACL Sysvol:<pre><code># samba-tool ntacl sysvolreset
+</code></pre>
+Сброс всех well-known ACL в каталоге:<pre><code># samba-tool dbcheck --cross-ncs --reset-well-known-acls --fix
+</code></pre>
+Исправление ошибок в базе AD:<pre><code># samba-tool dbcheck --cross-ncs --fix
+</code></pre>
+</li>
+</ul>
+<p><strong>Доменные члены Samba</strong></p>
+<ul>
+<li><em>Проверка конфигурации ID mapping (4.6.0 и новее).</em> Раньше неверная конфигурация ID mapping (перекрывающиеся диапазоны, неверные бэкенды для default-домена) приводила к тому, что <code>winbindd</code> стартовал, а маппинг не работал. Теперь <code>testparm</code> сообщает об ошибках, например:<pre><code>ERROR: The idmap range for the domain * (tdb) overlaps with the range of SAMDOM (ad)!
+ERROR: Do not use the 'ad' backend as the default idmap backend!
+</code></pre>
+а <code>winbindd</code> при неверной конфигурации больше не стартует и пишет в лог, например:<pre><code>main: FATAL: Invalid idmap backend ad configured as the default backend!
+</code></pre>
+Подробности о поддерживаемых бэкендах — на странице «Identity Mapping Back Ends» и в разделе IDENTITY MAPPING CONSIDERATIONS man-страницы smb.conf(5).</li>
+<li><em>Бэкенд id mapping «ad» поддерживает RFC2307 или template-режим по домену (4.6.0 и новее).</em> Новый параметр <code>idmap config domain_name:unix_nss_info</code> задаёт на уровне каждого домена AD, брать ли shell и домашний каталог пользователей из AD или применять <code>template shell</code>/<code>template homedir</code>. Он имеет приоритет над глобальным <code>winbind nss info = rfc2307</code>; умолчание <code>no</code> — значения берутся из template. Чтобы снова получать значения из AD, в секции <code>[global]</code> файла <code>smb.conf</code>:<pre><code>idmap config domain_name:unix_nss_info = yes
+</code></pre>
+</li>
+</ul>
+<h2>Подводные камни</h2>
+<ul>
+<li><strong>При сборке из исходников заменяйте всю установку.</strong> Код может быть удалён между версиями; если установить новую сборку поверх старой, на диске могут остаться старые библиотеки, что приводит к ошибкам. На пакетные обновления из дистрибутива это не влияет.</li>
+<li><strong><code>--yes</code> исправляет все найденные проблемы, а не только replPropertyMetaData</strong> — предупреждение на странице выделено отдельно.</li>
+<li><strong>replPropertyMetaData — нережлицируемый атрибут:</strong> изменения не реплицируются на другие DC, поэтому проверку и исправление (<code>samba-tool dbcheck --cross-ncs --fix --yes</code>) нужно выполнить на всех контроллерах домена.</li>
+<li><strong>Понижение версии AD DC через границу мажорного релиза</strong> — учитывайте совместимость базы данных Active Directory.</li>
+<li><strong>Начиная с Samba 4.13.0 NT4-style домены объявлены устаревшими</strong> (декларирована устарелость части SMBv1-параметров); удалят их не скоро, но команду Samba рекомендует по возможности переходить на AD.</li>
+<li><strong>Файлы без x-бита больше не исполняются</strong> (с 4.0.0) — при обновлении исполняемые на шарах файлы могут перестать запускаться; временное решение — <code>acl allow execute always = yes</code>.</li>
+<li><strong><code>ldap server require strong auth = yes</code> по умолчанию</strong> — внешние приложения, подключающиеся к AD по LDAP без шифрования TLS, не смогут установить соединение.</li>
+<li><strong>После обновления 4.4.6+ не задавайте <code>idmap config</code> в smb.conf на DC</strong> — из-за бага клиенты не смогут подключаться к шарам на контроллере домена; параметры нужно удалить и перезапустить <code>samba</code> и клиенты.</li>
+</ul>
+<h2>Связанные заметки</h2>
+<ul>
+<li><a href="%D0%A0%D0%B5%D0%B7%D0%B5%D1%80%D0%B2%D0%BD%D0%BE%D0%B5-%D0%BA%D0%BE%D0%BF%D0%B8%D1%80%D0%BE%D0%B2%D0%B0%D0%BD%D0%B8%D0%B5-%D0%B8-%D0%B2%D0%BE%D1%81%D1%81%D1%82%D0%B0%D0%BD%D0%BE%D0%B2%D0%BB%D0%B5%D0%BD%D0%B8%D0%B5-AD-DC.html">Резервное копирование и восстановление AD DC</a></li>
+<li><a href="%D0%A3%D0%BF%D1%80%D0%B0%D0%B2%D0%BB%D0%B5%D0%BD%D0%B8%D0%B5-%D1%81%D0%BB%D1%83%D0%B6%D0%B1%D0%BE%D0%B9-AD-DC.html">Управление службой AD DC</a></li>
+<li><a href="%D0%94%D0%B8%D0%B0%D0%B3%D0%BD%D0%BE%D1%81%D1%82%D0%B8%D0%BA%D0%B0-AD-DC.html">Диагностика AD DC</a></li>
+<li><a href="%D0%A3%D1%81%D1%82%D0%B0%D0%BD%D0%BE%D0%B2%D0%BA%D0%B0-Samba-AD-DC.html">Установка Samba AD DC</a></li>
+<li><a href="%D0%9F%D0%B5%D1%80%D0%B5%D0%B4%D0%B0%D1%87%D0%B0-%D0%B8-%D0%B7%D0%B0%D1%85%D0%B2%D0%B0%D1%82-FSMO-%D1%80%D0%BE%D0%BB%D0%B5%D0%B9.html">Передача и захват FSMO ролей</a></li>
+</ul>
+</main>
+</body>
+</html>

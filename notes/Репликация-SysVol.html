@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Репликация SysVol</title>
+<link rel="stylesheet" href="../style.css">
+</head>
+<body>
+<nav><a href="../index.html">База знаний Samba AD DC</a></nav>
+<main><h1>Репликация SysVol</h1>
+<h2>Суть</h2>
+<p>Samba AD до сих пор не поддерживает репликацию SysVol — каталога с содержимым групповых политик (GPO) и сценариями входа, который DFS-R/FRS реплицируют между Windows DC. При двух и более DC (<a href="%D0%9F%D1%80%D0%B8%D1%81%D0%BE%D0%B5%D0%B4%D0%B8%D0%BD%D0%B5%D0%BD%D0%B8%D0%B5-%D0%B2%D1%82%D0%BE%D1%80%D0%BE%D0%B3%D0%BE-DC-%D0%BA-%D0%B4%D0%BE%D0%BC%D0%B5%D0%BD%D1%83.html">Присоединение второго DC к домену</a>) содержимое SysVol нужно синхронизировать обходными путями; без этого на новом DC с нестандартными GPO падает даже <code>samba-tool ntacl sysvolreset</code>. Варианты со страницы join: «Rsync based» (только Samba DC — быстрый и простой, односторонний), «Bidirectional Rsync/Unison» и «Bidirectional Rsync/osync» (двусторонние, сложнее), «Robocopy based» (Samba DC → Windows DC; процедура, команда и предупреждения — в <a href="Windows-DC-%D1%80%D1%8F%D0%B4%D0%BE%D0%BC-%D1%81-Samba-DC.html">Windows DC рядом с Samba DC</a>).</p>
+<h2>Ключевое</h2>
+<h3>Идея rsync-варианта</h3>
+<ul>
+<li>Репликация <strong>односторонняя</strong>: один DC — «мастер», на нём редактируют все GPO/скрипты; остальные DC регулярно забирают копию, локальные изменения на них затираются.</li>
+<li>Мастер — DC с ролью <strong>PDC_Emulator</strong>: GPMC по умолчанию подключается именно к нему (см. <a href="%D0%9F%D0%B5%D1%80%D0%B5%D0%B4%D0%B0%D1%87%D0%B0-%D0%B8-%D0%B7%D0%B0%D1%85%D0%B2%D0%B0%D1%82-FSMO-%D1%80%D0%BE%D0%BB%D0%B5%D0%B9.html">Передача и захват FSMO ролей</a>).</li>
+<li>Модуль rsync на мастере — read-only: ничего нельзя «затолкать» обратно.</li>
+<li>Реплицируется всё дерево SysVol: политики (GPT.INI, Registry.pol, Machine/User-каталоги) и скрипты.</li>
+<li>Транспорт — собственный демон rsync с файлом секретов (не SSH; допускается адаптация на SSH-туннель — тогда MITM-риск ниже).</li>
+</ul>
+<h3>Настройка на PDC Emulator</h3>
+<ol>
+<li>
+<p>Установить rsync с поддержкой расширенных ACL.</p>
+</li>
+<li>
+<p><code>/etc/xinetd.d/rsync</code> (запуск демона через xinetd, доступ ограничен сетью DC):</p>
+<pre><code>only_from       = 10.99.0.0/28
+server          = /usr/bin/rsync
+server_args     = --daemon
+</code></pre>
+</li>
+<li>
+<p><code>/etc/rsyncd.conf</code> — модуль:</p>
+<pre><code>[SysVol]
+path = /usr/local/samba/var/locks/sysvol/
+read only = yes
+auth users = sysvol-replication
+secrets file = /usr/local/samba/etc/rsyncd.secret
+</code></pre>
+</li>
+<li>
+<p><code>/usr/local/samba/etc/rsyncd.secret</code> — строка <code>sysvol-replication:pa$$w0rd</code> (не world-readable), перезапустить xinetd.</p>
+</li>
+</ol>
+<h3>Настройка на остальных DC</h3>
+<ol>
+<li><code>/usr/local/samba/etc/rsync-sysvol.secret</code> — файл с одним паролем (не world-readable).</li>
+<li>Сначала пробный прогон с <code>--dry-run</code>, затем рабочий запуск:</li>
+</ol>
+<pre><code>rsync --dry-run -XAavz --delete-after --password-file=/usr/local/samba/etc/rsync-sysvol.secret rsync://sysvol-replication@{IP-of-your-PDC-Emulator}/SysVol/ /path/to/your/sysvol/folder/
+</code></pre>
+<ol start="3">
+<li>По расписанию (cron, каждые 5 минут):</li>
+</ol>
+<pre><code>*/5 * * * * rsync -XAavz --delete-after --password-file=/usr/local/samba/etc/rsync-sysvol.secret rsync://sysvol-replication@{IP-of-your-PDC-Emulator}/SysVol/ /path/to/your/sysvol/folder/
+</code></pre>
+<h3>Предпосылка: одинаковые ID-маппинги</h3>
+<p>Синхронизация SysVol работает корректно, только если встроенные пользователи/группы имеют одинаковые ID на всех DC — иначе <code>idmap.ldb</code> с держателя PDC_Emulator предварительно синхронизируют вручную (процедура в <a href="%D0%9F%D1%80%D0%B8%D1%81%D0%BE%D0%B5%D0%B4%D0%B8%D0%BD%D0%B5%D0%BD%D0%B8%D0%B5-%D0%B2%D1%82%D0%BE%D1%80%D0%BE%D0%B3%D0%BE-DC-%D0%BA-%D0%B4%D0%BE%D0%BC%D0%B5%D0%BD%D1%83.html">Присоединение второго DC к домену</a>).</p>
+<h2>Подводные камни</h2>
+<ul>
+<li><strong>Односторонность:</strong> GPO правят только на PDC Emulator; изменения, сделанные на других DC, будут перезаписаны при следующей синхронизации.</li>
+<li><strong><code>--delete-after</code> деструктивен:</strong> команда удаляет в целевом каталоге всё, чего нет на источнике, — сверить путь назначения, прежде чем запускать (можно повредить систему).</li>
+<li><strong>Задержка распространения:</strong> cron-интервал (в примере 5 минут) — изменения доходят не мгновенно.</li>
+<li><strong>rsync без SSH небезопасен</strong> (риск man-in-the-middle); для большинства инсталляций содержимое SysVol неконфиденциально, но при возможности используют SSH-вариант.</li>
+<li>Двусторонние схемы (Unison, osync) требуют сторонних скриптов и cron-задач на каждом DC против каждого — сложнее в сопровождении.</li>
+<li>Кластеризация через GlusterFS+CTDB для AD DC не вариант: по утверждению самой страницы-источника, CTDB (необходимый для кластерного Samba) несовместим с ролью Samba AD DC; о CTDB как компоненте кластера из членов домена — <a href="CTDB-%D0%B8-%D0%BA%D0%BB%D0%B0%D1%81%D1%82%D0%B5%D1%80%D0%BD%D1%8B%D0%B9-Samba.html">CTDB и кластерный Samba</a>.</li>
+<li>Не забывать <code>samba-tool ntacl sysvolreset</code> после ручного восстановления SysVol на новом DC (см. <a href="%D0%9F%D1%80%D0%B8%D1%81%D0%BE%D0%B5%D0%B4%D0%B8%D0%BD%D0%B5%D0%BD%D0%B8%D0%B5-%D0%B2%D1%82%D0%BE%D1%80%D0%BE%D0%B3%D0%BE-DC-%D0%BA-%D0%B4%D0%BE%D0%BC%D0%B5%D0%BD%D1%83.html">Присоединение второго DC к домену</a>).</li>
+</ul>
+<h2>Связанные заметки</h2>
+<ul>
+<li><a href="%D0%9F%D1%80%D0%B8%D1%81%D0%BE%D0%B5%D0%B4%D0%B8%D0%BD%D0%B5%D0%BD%D0%B8%D0%B5-%D0%B2%D1%82%D0%BE%D1%80%D0%BE%D0%B3%D0%BE-DC-%D0%BA-%D0%B4%D0%BE%D0%BC%D0%B5%D0%BD%D1%83.html">Присоединение второго DC к домену</a></li>
+<li><a href="%D0%9F%D0%B5%D1%80%D0%B5%D0%B4%D0%B0%D1%87%D0%B0-%D0%B8-%D0%B7%D0%B0%D1%85%D0%B2%D0%B0%D1%82-FSMO-%D1%80%D0%BE%D0%BB%D0%B5%D0%B9.html">Передача и захват FSMO ролей</a></li>
+<li><a href="CTDB-%D0%B8-%D0%BA%D0%BB%D0%B0%D1%81%D1%82%D0%B5%D1%80%D0%BD%D1%8B%D0%B9-Samba.html">CTDB и кластерный Samba</a></li>
+<li><a href="%D0%A3%D1%81%D1%82%D0%B0%D0%BD%D0%BE%D0%B2%D0%BA%D0%B0-Samba-AD-DC.html">Установка Samba AD DC</a></li>
+<li><a href="Windows-DC-%D1%80%D1%8F%D0%B4%D0%BE%D0%BC-%D1%81-Samba-DC.html">Windows DC рядом с Samba DC</a></li>
+</ul>
+</main>
+</body>
+</html>

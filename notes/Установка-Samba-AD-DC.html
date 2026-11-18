@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Установка Samba как контроллера домена Active Directory</title>
+<link rel="stylesheet" href="../style.css">
+</head>
+<body>
+<nav><a href="../index.html">База знаний Samba AD DC</a></nav>
+<main><h1>Установка Samba как контроллера домена Active Directory</h1>
+<h2>Суть</h2>
+<p>Страница описывает установку Samba и подготовку (provisioning) первого контроллера домена (DC) для построения нового леса Active Directory; та же инструкция применяется при миграции домена Samba NT4 на AD (classic upgrade). Начиная с версии 4.0 (2012 год) Samba способна работать контроллером домена AD и обслуживает функциональный уровень леса Windows Server 2008 R2. Весь процесс состоит из пяти шагов: установка Samba и сопутствующих пакетов, удаление заготовочных конфигурационных файлов Samba и Kerberos, provisioning утилитой samba-tool, правка smb.conf (включение Group Policy и других функций), настройка окружения под конкретный дистрибутив Unix/Linux.</p>
+<h2>Ключевое</h2>
+<h3>Что поддерживает Samba AD DC</h3>
+<ul>
+<li>Функциональный уровень леса — Windows Server 2008 R2 (достаточно для предприятий с Windows 10/11 и строгими требованиями соответствия, включая NIST 800-171). Начиная с Samba 4.19 можно задать более высокий функциональный уровень, но это work in progress — не для production.</li>
+<li>В качестве бэкенда AD — только встроенный LDAP-сервер (OpenLDAP и другие внешние LDAP-серверы не поддерживаются).</li>
+<li>Kerberos KDC — только Heimdal. MIT Kerberos KDC поддерживается экспериментально (Samba 4.7+, сборка с опцией <code>--with-system-mitkrb5</code>).</li>
+<li>В production рекомендуется два и более DC ради отказоустойчивости.</li>
+<li>Установка Samba и provisioning DC не включают функциональность Group Policy автоматически — после provisioning нужно вручную включить её в <code>smb.conf</code>: добавить в секцию <code>[global]</code> параметр <code>apply group policies = yes</code> (страница Group Policy, раздел Winbind); ручное применение политик — <code>samba-gpupdate --force</code>.</li>
+</ul>
+<p>Пример из документации: Hostname <code>DC1</code>, IP контроллера <code>10.99.0.1</code>, домен аутентификации <code>SAMDOM.EXAMPLE.COM</code>, домен верхнего уровня <code>EXAMPLE.COM</code>.</p>
+<h3>Подготовка (свежая установка)</h3>
+<ul>
+<li>Выбрать DNS-домен для леса AD: не использовать домен верхнего уровня организации (он начнёт резолвиться в DC, и публичный сайт станет недоступен); определить поддомен — в примере <code>SAMDOM.EXAMPLE.COM</code>. Это же имя станет Kerberos realm. В лаборатории можно использовать, например, <code>.INTERNAL</code>, но только там: <code>.internal</code> — недействительный TLD (с 01.11.2015 удостоверяющие центры не выдают на такие имена сертификаты; RFC 8375 вместо подобных имён предлагает <code>home.arpa</code>) — для production брать поддомен принадлежащего вам домена, см. <a href="%D0%98%D0%BC%D0%B5%D0%BD%D0%BE%D0%B2%D0%B0%D0%BD%D0%B8%D0%B5-%D0%B4%D0%BE%D0%BC%D0%B5%D0%BD%D0%B0-FAQ.html">Именование домена FAQ</a>.</li>
+<li>Имя хоста DC — менее 15 символов (ограничение netbios); в примере <code>DC1</code>. Не использовать термины NT4 (<code>PDC</code>, <code>BDC</code>) — таких режимов в AD нет.</li>
+<li>Задать статический IP и сделать резервацию на роутере: DC станет DNS-резолвером для всех рабочих станций домена, поэтому IP может понадобиться вынести за пределы пула DHCP.</li>
+<li>Отключить инструменты, автоматически обновляющие <code>/etc/resolv.conf</code> (например, <code>resolvconf</code>).</li>
+<li>Проверить, что <code>/etc/hosts</code> на DC резолвит FQDN и короткое имя в LAN IP контроллера:</li>
+</ul>
+<pre><code>127.0.0.1     localhost
+10.99.0.1     DC1.samdom.example.com     DC1
+</code></pre>
+<ul>
+<li>Узнать путь к существующему <code>smb.conf</code> и удалить его:</li>
+</ul>
+<pre><code># smbd -b | grep &quot;CONFIGFILE&quot;
+   CONFIGFILE: /usr/local/samba/etc/samba/smb.conf
+</code></pre>
+<ul>
+<li>Если Samba ранее уже стояла на этом хосте — удалить все файлы баз данных (<code>*.tdb</code>, <code>*.ldb</code>). Папки с базами показывает команда:</li>
+</ul>
+<pre><code># smbd -b | egrep &quot;LOCKDIR|STATEDIR|CACHEDIR|PRIVATE_DIR&quot;
+  LOCKDIR: /usr/local/samba/var/lock/
+  STATEDIR: /usr/local/samba/var/locks/
+  CACHEDIR: /usr/local/samba/var/cache/
+  PRIVATE_DIR: /usr/local/samba/private/
+</code></pre>
+<p>Чистое окружение предотвращает смешивание файлов старой и новой установок.</p>
+<h3>Provisioning (создание домена)</h3>
+<ul>
+<li>Provisioning требует прав root.</li>
+<li>Рекомендуется включить NIS-расширения параметром <code>--use-rfc2307</code>: недостатков нет, а включение их в уже существующем домене требует ручного расширения схемы AD.</li>
+<li>Справка по параметрам: <code># samba-tool domain provision --help</code>.</li>
+</ul>
+<p>Интерактивный режим. Сначала отбросить созданный установкой <code>smb.conf</code>, иначе provisioning завершится ошибкой:</p>
+<pre><code># mv /etc/samba/smb.conf /etc/samba/smb.conf.initial
+</code></pre>
+<p>затем:</p>
+<pre><code># samba-tool domain provision --use-rfc2307 --interactive
+</code></pre>
+<p>Диалог выглядит так:</p>
+<pre><code> Realm [SAMDOM.EXAMPLE.COM]: SAMDOM.EXAMPLE.COM
+  Domain [SAMDOM]: SAMDOM
+  Server Role (dc, member, standalone) [dc]: dc
+  DNS backend (SAMBA_INTERNAL, BIND9_FLATFILE, BIND9_DLZ, NONE) [SAMBA_INTERNAL]: SAMBA_INTERNAL
+  DNS forwarder IP address (write 'none' to disable forwarding) [10.99.0.1]: 8.8.8.8
+ Administrator password: Passw0rd
+ Retype password: Passw0rd
+</code></pre>
+<p>По завершении выводится итог: Server Role: active directory domain controller, Hostname: DC1, NetBIOS Domain: SAMDOM, DNS Domain: samdom.example.com, DOMAIN SID.</p>
+<p>Неинтерактивный режим (те же настройки одной командой):</p>
+<pre><code># samba-tool domain provision --server-role=dc --use-rfc2307 --dns-backend=SAMBA_INTERNAL --realm=SAMDOM.EXAMPLE.COM --domain=SAMDOM --adminpass=Passw0rd
+</code></pre>
+<p>Параметры:</p>
+<ul>
+<li><code>--use-rfc2307</code> — включает NIS-расширения, нужные для вкладки ADUC Unix Attributes.</li>
+<li><code>--realm</code> — Kerberos realm: домен AD DNS в верхнем регистре, например <code>SAMDOM.EXAMPLE.COM</code>.</li>
+<li><code>--domain</code> — NetBIOS-имя домена (Workgroup): одно слово, не длиннее 15 символов, без точки; рекомендуется первая часть AD DNS-домена (<code>samdom</code>); не использовать короткое имя хоста.</li>
+<li><code>--server-role=dc</code> — роль контроллера домена.</li>
+<li><code>--dns-backend</code> — бэкенд DNS; первый DC в AD обязан устанавливаться с DNS-бэкендом.</li>
+<li>DNS forwarder IP address — доступен только при бэкенде <code>SAMBA_INTERNAL</code> (настройка DNS forwarder — см. Samba Internal DNS Back End).</li>
+<li><code>--adminpass</code> — пароль администратора домена; при несоответствии требованиям сложности provisioning завершится ошибкой.</li>
+</ul>
+<p>Для сервера с несколькими сетевыми интерфейсами используют <code>--option=&quot;interfaces=lo eth0&quot; --option=&quot;bind interfaces only=yes&quot;</code> — это позволяет samba-tool зарегистрировать корректный LAN IP в каталоге.</p>
+<h3>Настройка DNS-бэкенда AD</h3>
+<p>Пропустить, если использовали <code>SAMBA_INTERNAL</code>. Для BIND: настроить BIND DNS server и модуль <code>BIND9_DLZ</code> (см. <a href="BIND9-DLZ-DNS-%D0%B1%D1%8D%D0%BA%D0%B5%D0%BD%D0%B4.html">BIND9 DLZ DNS бэкенд</a>), затем запустить BIND:</p>
+<pre><code># systemctl start named
+</code></pre>
+<h3>Настройка DNS-резолвера</h3>
+<p>Члены домена находят службы (LDAP, Kerberos) через DNS, поэтому DC должен использовать DNS, разрешающий зоны AD. В <code>/etc/resolv.conf</code> указать домен AD в <code>search</code> и IP контроллера в <code>nameserver</code>:</p>
+<pre><code>search samdom.example.com
+nameserver 10.99.0.1
+</code></pre>
+<p>Других строк добавлять не нужно: DC использует сам себя как nameserver и находит остальные DNS-данные на своём DNS-сервере.</p>
+<h3>Настройка Kerberos</h3>
+<p>Во время provisioning Samba создала файл конфигурации Kerberos — скопировать его в конфигурацию ОС (путь всегда брать из вывода provisioning):</p>
+<pre><code># cp /usr/local/samba/private/krb5.conf /etc/krb5.conf
+</code></pre>
+<p>Созданный заранее конфиг использует SRV-записи DNS для поиска KDC.</p>
+<h3>Запуск и проверка DC</h3>
+<p>Запуск вручную:</p>
+<pre><code># samba
+</code></pre>
+<p>Samba не поставляет init-скрипты System V, <code>systemd</code>, <code>upstart</code> и другие файлы служб: при установке из пакетов использовать включённый в пакет скрипт/юнит, при самостоятельной сборке — см. Managing the Samba AD DC Service.</p>
+<p>Проверка, что шары на месте (вывод различается до/после Samba 4.11.0):</p>
+<pre><code>$ smbclient -L localhost -N
+</code></pre>
+<p>Шары <code>netlogon</code> и <code>sysvol</code> создаются автоматически при provisioning и обязаны существовать на DC.</p>
+<p>Проверка аутентификации — подключение к шаре <code>netlogon</code> от имени администратора домена:</p>
+<pre><code>$ smbclient //localhost/netlogon -UAdministrator -c 'ls'
+</code></pre>
+<h3>Обратная зона DNS (опционально)</h3>
+<p>Перед созданием зоны Samba AD DC должен быть запущен. Создание обратной зоны:</p>
+<pre><code># samba-tool dns zonecreate &lt;Your-AD-DNS-Server-IP-or-hostname&gt; 0.99.10.in-addr.arpa -U Administrator
+ Password for [administrator@SAMDOM.EXAMPLE.COM]:
+ Zone 0.99.10.in-addr.arpa created successfully
+</code></pre>
+<p>Для нескольких подсетей команду повторяют с данными каждой. Зона работает сразу, без перезапуска Samba или BIND. Затем добавить PTR-запись для DC (для FQDN <code>dc1.samdom.example.com</code> и IP <code>10.99.0.1</code>):</p>
+<pre><code># samba-tool dns add &lt;Your-AD-DNS-Server-IP-or-hostname&gt; 0.99.10.in-addr.arpa 1 PTR dc1.samdom.example.com -U Administrator
+ Password for [administrator@SAMDOM.EXAMPLE.COM]:
+ Record added successfully
+</code></pre>
+<h3>Проверка DNS (опционально)</h3>
+<pre><code>$ host -t SRV _ldap._tcp.samdom.example.com.
+ _ldap._tcp.samdom.example.com has SRV record 0 100 389 dc1.samdom.example.com.
+
+$ host -t SRV _kerberos._udp.samdom.example.com.
+ _kerberos._udp.samdom.example.com has SRV record 0 100 88 dc1.samdom.example.com.
+
+$ host -t A dc1.samdom.example.com.
+ dc1.samdom.example.com has address 10.99.0.1
+
+$ host -t PTR 10.99.0.1
+ 1.0.99.10.in-addr.arpa domain name pointer dc1.samdom.example.com.
+</code></pre>
+<h3>Проверка Kerberos (опционально)</h3>
+<p>Запросить билет Kerberos для учётной записи администратора домена:</p>
+<pre><code>$ kinit administrator
+ Password for administrator@SAMDOM.EXAMPLE.COM:
+</code></pre>
+<p>Показать кэшированные билеты:</p>
+<pre><code>$ klist
+ Ticket cache: FILE:/tmp/krb5cc_0
+ Default principal: administrator@SAMDOM.EXAMPLE.COM
+</code></pre>
+<p>Если принципал не передан в формате <code>user@REALM</code>, Kerberos realm добавляется автоматически; realm всегда вводится в верхнем регистре.</p>
+<h3>Синхронизация времени</h3>
+<p>Kerberos требует синхронизированного времени на всех членах домена; настраивается службами <code>ntpd</code> или <code>chrony</code> (см. Time Synchronization). Если Samba DC администрирует Group Policy, можно задать GPO, синхронизирующий рабочие станции с <code>time.windows.com</code>.</p>
+<h3>DC как файловый сервер</h3>
+<p>Samba не рекомендует использовать DC как файловый сервер: лучше держать более одного DC (это хорошая мера резервирования и упрощает обновления), обновления DC выполняются установкой с нуля с репликацией изменений, у DC и файлового сервера разные циклы развития, а на DC принудительно включён обязательный SMB signing. Если всё же решено использовать DC как файловый сервер — см. раздел «Подводные камни».</p>
+<h2>Подводные камни</h2>
+<ul>
+<li>Samba 4.19+: поддержка более высоких функциональных уровней — work in progress, в production не использовать.</li>
+<li>Установка и provisioning не включают Group Policy автоматически — после provisioning требуется добавить в <code>[global]</code> параметр <code>apply group policies = yes</code> (Group Policy → Winbind; ручное применение политик — <code>samba-gpupdate --force</code>).</li>
+<li>Samba не поддерживает переименование AD DNS-зоны и Kerberos realm — provisioning выполнять доменом, который не придётся менять.</li>
+<li>Не использовать <code>.local</code> в качестве TLD — он занят Avahi.</li>
+<li>Не использовать домен верхнего уровня организации: домен установки Samba будет резолвиться в контроллер, и публичный сайт станет недоступен.</li>
+<li>Имя хоста DC — менее 15 символов; не использовать <code>PDC</code>/<code>BDC</code> в качестве имени — в AD таких режимов нет, будет путаница.</li>
+<li>Имя хоста и FQDN не должны резолвиться в <code>127.0.0.1</code> или любой другой IP, кроме LAN IP контроллера.</li>
+<li>Пути в вики даны для самособранной Samba (<code>/usr/local/samba</code>); для пакетов дистрибутива пути другие (обычно <code>/etc/samba</code> и <code>/var/lib/samba</code>) — сверяться с документацией дистрибутива.</li>
+<li>Provisioning требует прав root.</li>
+<li>При интерактивном provisioning существующий <code>smb.conf</code> нужно отбросить (переименовать/удалить), иначе процесс завершится ошибкой.</li>
+<li>Несоответствующий требованиям сложности пароль администратора приводит к падению provisioning.</li>
+<li>Не использовать <code>NONE</code> в качестве DNS-бэкенда; при BIND не использовать <code>BIND9_FLATFILE</code> — оба не поддерживаются и будут удалены в будущих версиях Samba.</li>
+<li>После provisioning первого DC новые контроллеры в этом домене не provision-ят, а присоединяют (join).</li>
+<li>Не создавать символическую ссылку на сгенерированный <code>krb5.conf</code>: с Samba 4.7 каталог <code>/usr/local/samba/private/</code> недоступен пользователям кроме root, и через symlink файл не смогут прочитать — например, сломаются динамические DNS-обновления при бэкенде <code>BIND_DLZ</code>.</li>
+<li>В <code>/etc/resolv.conf</code> контроллера не добавлять лишних строк: DC должен использовать сам себя как nameserver.</li>
+<li>Запустить Samba AD DC до добавления обратной зоны.</li>
+<li>Обратные (PTR) записи не добавляются автоматически — их создают вручную или настраивают Windows-компьютеры на самостоятельное добавление при обновлении DNS-записей.</li>
+<li>Kerberos realm в <code>kinit</code> всегда вводить в верхнем регистре.</li>
+<li>Не использовать AD DC как файловый сервер при нескольких DC — это проблематично и может вызывать странные ошибки; допускается только если это единственный экземпляр Samba в домене (лучше завести отдельный Unix domain member, например в VM).</li>
+<li>На файловых шарах DC авто-включённый VFS-объект <code>acl_xattr</code> позволяет настраивать шары только с Windows ACL — POSIX ACL не работают.</li>
+<li>Дополнительный VFS-объект на шаре DC нельзя задавать как <code>vfs objects = recycle</code> — это отключит дефолтные <code>dfs_samba4</code> и <code>acl_xattr</code>; нужно <code>vfs objects = dfs_samba4 acl_xattr recycle</code>.</li>
+<li>На DC не добавлять строки <code>idmap config</code>, используемые на Unix domain member, — они не работают и вызывают проблемы.</li>
+<li>Права на шарах DC задавать только из Windows; старые методы (<code>force user</code> и т.п.) не работают корректно и вызывают проблемы.</li>
+</ul>
+<h2>Связанные заметки</h2>
+<ul>
+<li><a href="%D0%93%D0%BB%D0%B0%D0%B2%D0%BD%D0%B0%D1%8F-Samba-Wiki.html">Главная Samba Wiki</a></li>
+</ul>
+<p>Смежные заметки хранилища: присоединение дополнительного DC (<a href="%D0%9F%D1%80%D0%B8%D1%81%D0%BE%D0%B5%D0%B4%D0%B8%D0%BD%D0%B5%D0%BD%D0%B8%D0%B5-%D0%B2%D1%82%D0%BE%D1%80%D0%BE%D0%B3%D0%BE-DC-%D0%BA-%D0%B4%D0%BE%D0%BC%D0%B5%D0%BD%D1%83.html">Присоединение второго DC к домену</a>), внутренний DNS-бэкенд (<a href="%D0%92%D0%BD%D1%83%D1%82%D1%80%D0%B5%D0%BD%D0%BD%D0%B8%D0%B9-DNS-%D0%B1%D1%8D%D0%BA%D0%B5%D0%BD%D0%B4.html">Внутренний DNS бэкенд</a>), бэкенд BIND9 DLZ (<a href="BIND9-DLZ-DNS-%D0%B1%D1%8D%D0%BA%D0%B5%D0%BD%D0%B4.html">BIND9 DLZ DNS бэкенд</a>), синхронизация времени (<a href="%D0%A1%D0%B8%D0%BD%D1%85%D1%80%D0%BE%D0%BD%D0%B8%D0%B7%D0%B0%D1%86%D0%B8%D1%8F-%D0%B2%D1%80%D0%B5%D0%BC%D0%B5%D0%BD%D0%B8.html">Синхронизация времени</a>), поиск и устранение неисправностей (<a href="%D0%94%D0%B8%D0%B0%D0%B3%D0%BD%D0%BE%D1%81%D1%82%D0%B8%D0%BA%D0%B0-AD-DC.html">Диагностика AD DC</a>), управление службой DC (<a href="%D0%A3%D0%BF%D1%80%D0%B0%D0%B2%D0%BB%D0%B5%D0%BD%D0%B8%D0%B5-%D1%81%D0%BB%D1%83%D0%B6%D0%B1%D0%BE%D0%B9-AD-DC.html">Управление службой AD DC</a>), Samba как член домена (<a href="Samba-%D0%BA%D0%B0%D0%BA-%D1%87%D0%BB%D0%B5%D0%BD-%D0%B4%D0%BE%D0%BC%D0%B5%D0%BD%D0%B0.html">Samba как член домена</a>), idmap-бэкенды и RFC2307 (<a href="Idmap-%D0%B1%D1%8D%D0%BA%D0%B5%D0%BD%D0%B4%D1%8B-%D0%B8-RFC2307.html">Idmap бэкенды и RFC2307</a>).</p>
+<p>Темы для будущих заметок (страницы вики, упомянутые здесь, заметок пока нет): требования к ОС (Operating System Requirements), файловым системам (File System Support) и сборка из исходников (Build Samba from Source), MIT Kerberos KDC (Running a Samba AD DC with MIT Kerberos KDC), файловый сервис (Samba File Serving), Winbindd на DC (Configuring Winbindd on a Samba AD DC).</p>
+<p>Темы из этого же списка уже закрыты заметками: классический апгрейд NT4-домена — <a href="%D0%9C%D0%B8%D0%B3%D1%80%D0%B0%D1%86%D0%B8%D1%8F-NT4-%D0%B4%D0%BE%D0%BC%D0%B5%D0%BD%D0%B0-%D0%B2-Samba-AD.html">Миграция NT4 домена в Samba AD</a>, установка Samba в дистрибутивах — <a href="%D0%94%D0%B8%D1%81%D1%82%D1%80%D0%B8%D0%B1%D1%83%D1%82%D0%B8%D0%B2%D0%BD%D1%8B%D0%B5-%D0%BF%D0%B0%D0%BA%D0%B5%D1%82%D1%8B-Samba-AD-DC.html">Дистрибутивные пакеты Samba AD DC</a>, Group Policy (флаг включения — параметр <code>apply group policies</code>, см. выше) — <a href="%D0%93%D1%80%D1%83%D0%BF%D0%BF%D0%BE%D0%B2%D1%8B%D0%B5-%D0%9F%D0%BE%D0%BB%D0%B8%D1%82%D0%B8%D0%BA%D0%B8-GPO.html">Групповые Политики GPO</a>.</p>
+<p>Отдельно — смежные темы, которых в списке будущих заметок не было: доверия между доменами — <a href="%D0%94%D0%BE%D0%B2%D0%B5%D1%80%D0%B8%D1%82%D0%B5%D0%BB%D1%8C%D0%BD%D1%8B%D0%B5-%D0%BE%D1%82%D0%BD%D0%BE%D1%88%D0%B5%D0%BD%D0%B8%D1%8F-%D0%BC%D0%B5%D0%B6%D0%B4%D1%83-%D0%B4%D0%BE%D0%BC%D0%B5%D0%BD%D0%B0%D0%BC%D0%B8.html">Доверительные отношения между доменами</a>, усиление безопасности DC — <a href="%D0%A5%D0%B0%D1%80%D0%B4%D0%B5%D0%BD%D0%B8%D0%BD%D0%B3-Samba-AD-DC.html">Харденинг Samba AD DC</a>.</p>
+</main>
+</body>
+</html>

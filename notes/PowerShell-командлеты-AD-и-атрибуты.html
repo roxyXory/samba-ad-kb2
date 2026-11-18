@@ -1,0 +1,530 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PowerShell-командлеты AD и атрибуты объектов</title>
+<link rel="stylesheet" href="../style.css">
+</head>
+<body>
+<nav><a href="../index.html">База знаний Samba AD DC</a></nav>
+<main><h1>PowerShell-командлеты AD и атрибуты объектов</h1>
+<h2>Суть</h2>
+<p>Администрировать домен из Windows удобно штатными средствами: оснастками RSAT (ADUC, DNS, GPMC) и модулем PowerShell <strong>ActiveDirectory</strong>. Но есть принципиальное ограничение: модуль ActiveDirectory работает <strong>только через ADWS</strong> (Active Directory Web Services, TCP 9389), а в Samba AD DC <strong>ADWS не реализован</strong> — соответствующий запрос в багтрекере Samba (bug 11231 «Active Directory Web Services (ADWS) should be supported») до сих пор в статусе NEW. Поэтому против чистого Samba DC командлеты <code>Get-ADUser</code>, <code>New-ADUser</code> и т.п. не работают — они уместны только в смешанном домене с Windows DC. Ниже: что работает с Samba, таблица соответствия командлетов (для смешанных доменов и как справочник), рабочие способы через LDAP из PowerShell и «данные» — атрибуты AD-объектов.</p>
+<h2>Что реально работает с Samba AD DC</h2>
+<ul>
+<li><strong>Оснастки RSAT по LDAP/RPC:</strong> <code>dsa.msc</code> (ADUC), <code>dnsmgmt.msc</code>, <code>gpmc.msc</code> — работают с Samba DC (см. <a href="%D0%93%D1%80%D1%83%D0%BF%D0%BF%D0%BE%D0%B2%D1%8B%D0%B5-%D0%9F%D0%BE%D0%BB%D0%B8%D1%82%D0%B8%D0%BA%D0%B8-GPO.html">Групповые Политики GPO</a>).</li>
+<li><strong>ADAC</strong> (<code>dsac.exe</code>) и <strong>модуль ActiveDirectory</strong> — требуют ADWS, с Samba DC не работают.</li>
+<li><strong>PowerShell через LDAP:</strong> <code>System.DirectoryServices.Protocols</code> или <code>System.DirectoryServices</code> (ADSI) — работают против Samba без ADWS (примеры ниже).</li>
+<li><strong>samba-tool</strong> — штатный путь для всех операций (см. <a href="%D0%A3%D0%BF%D1%80%D0%B0%D0%B2%D0%BB%D0%B5%D0%BD%D0%B8%D0%B5-%D0%BF%D0%BE%D0%BB%D1%8C%D0%B7%D0%BE%D0%B2%D0%B0%D1%82%D0%B5%D0%BB%D1%8F%D0%BC%D0%B8-%D0%B3%D1%80%D1%83%D0%BF%D0%BF%D0%B0%D0%BC%D0%B8-%D0%B8-OU.html">Управление пользователями группами и OU</a>).</li>
+</ul>
+<h2>Таблица соответствия: samba-tool ↔ PowerShell (модуль ActiveDirectory)</h2>
+<table>
+<thead>
+<tr>
+<th>Действие</th>
+<th>samba-tool</th>
+<th>PowerShell (AD module)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Создать пользователя</td>
+<td><code>user create</code></td>
+<td><code>New-ADUser</code></td>
+</tr>
+<tr>
+<td>Список пользователей</td>
+<td><code>user list</code></td>
+<td><code>Get-ADUser -Filter *</code></td>
+</tr>
+<tr>
+<td>Показать пользователя</td>
+<td><code>user show</code></td>
+<td><code>Get-ADUser -Identity</code></td>
+</tr>
+<tr>
+<td>Изменить атрибуты</td>
+<td><code>user edit</code></td>
+<td><code>Set-ADUser -Replace/–Add/–Remove @{...}</code></td>
+</tr>
+<tr>
+<td>Удалить пользователя</td>
+<td><code>user delete</code></td>
+<td><code>Remove-ADUser</code></td>
+</tr>
+<tr>
+<td>Переместить объект</td>
+<td><code>user move</code> / <code>group move</code></td>
+<td><code>Move-ADObject -TargetPath</code></td>
+</tr>
+<tr>
+<td>Переименовать</td>
+<td><code>user rename</code></td>
+<td><code>Rename-ADObject</code></td>
+</tr>
+<tr>
+<td>Включить / выключить</td>
+<td><code>user enable/disable</code></td>
+<td><code>Enable-ADAccount</code> / <code>Disable-ADAccount</code></td>
+</tr>
+<tr>
+<td>Разблокировать</td>
+<td><code>user unlock</code></td>
+<td><code>Unlock-ADAccount</code></td>
+</tr>
+<tr>
+<td>Сменить пароль</td>
+<td><code>user setpassword</code></td>
+<td><code>Set-ADAccountPassword -Reset</code></td>
+</tr>
+<tr>
+<td>Срок действия</td>
+<td><code>user setexpiry --days</code></td>
+<td><code>Set-ADAccountExpiration -DateTime</code></td>
+</tr>
+<tr>
+<td>Первичная группа</td>
+<td><code>user setprimarygroup</code></td>
+<td><code>Set-ADUser -Replace @{primaryGroupID=...}</code></td>
+</tr>
+<tr>
+<td>Группы пользователя</td>
+<td><code>user getgroups</code></td>
+<td><code>Get-ADPrincipalGroupMembership</code></td>
+</tr>
+<tr>
+<td>Создать группу</td>
+<td><code>group add</code></td>
+<td><code>New-ADGroup -GroupScope/-GroupCategory</code></td>
+</tr>
+<tr>
+<td>Список групп</td>
+<td><code>group list -v</code></td>
+<td><code>Get-ADGroup -Filter *</code></td>
+</tr>
+<tr>
+<td>Члены группы</td>
+<td><code>group listmembers</code></td>
+<td><code>Get-ADGroupMember</code> (<code>-Recursive</code>)</td>
+</tr>
+<tr>
+<td>Добавить в группу</td>
+<td><code>group addmembers</code></td>
+<td><code>Add-ADGroupMember -Members</code></td>
+</tr>
+<tr>
+<td>Убрать из группы</td>
+<td><code>group removemembers</code></td>
+<td><code>Remove-ADGroupMember</code></td>
+</tr>
+<tr>
+<td>Статистика членства</td>
+<td><code>group stats</code></td>
+<td><code>Get-ADGroupMember</code> + группировка</td>
+</tr>
+<tr>
+<td>Создать OU</td>
+<td><code>ou add</code></td>
+<td><code>New-ADOrganizationalUnit -Path</code></td>
+</tr>
+<tr>
+<td>Список OU</td>
+<td><code>ou list</code></td>
+<td><code>Get-ADOrganizationalUnit -Filter *</code></td>
+</tr>
+<tr>
+<td>Удалить OU</td>
+<td><code>ou delete</code></td>
+<td><code>Remove-ADOrganizationalUnit</code> (<code>-Recursive</code>)</td>
+</tr>
+<tr>
+<td>Содержимое OU</td>
+<td><code>ou listobjects</code></td>
+<td><code>Get-ADObject -SearchBase -SearchScope</code></td>
+</tr>
+<tr>
+<td>Создать компьютер</td>
+<td><code>computer add</code></td>
+<td><code>New-ADComputer</code></td>
+</tr>
+<tr>
+<td>Список компьютеров</td>
+<td><code>computer list</code></td>
+<td><code>Get-ADComputer -Filter *</code></td>
+</tr>
+<tr>
+<td>Делегирование «любому сервису»</td>
+<td><code>delegation for-any-service on</code></td>
+<td><code>Set-ADAccountControl -TrustedForDelegation $true</code></td>
+</tr>
+<tr>
+<td>Делегирование S4U2Proxy</td>
+<td><code>delegation for-any-protocol on</code></td>
+<td><code>Set-ADAccountControl -TrustedToAuthForDelegation $true</code></td>
+</tr>
+<tr>
+<td>Ограниченное делегирование</td>
+<td><code>delegation add-service</code></td>
+<td><code>Set-ADUser -Add @{'msDS-AllowedToDelegateTo'='...'}</code></td>
+</tr>
+<tr>
+<td>RBCD</td>
+<td><code>delegation add-principal</code></td>
+<td><code>Set-ADUser -Add @{'msDS-AllowedToActOnBehalfOfOtherIdentity'=...}</code></td>
+</tr>
+<tr>
+<td>Парольная политика</td>
+<td><code>domain passwordsettings show/set</code></td>
+<td><code>Get-ADDefaultDomainPasswordPolicy</code> / <code>Set-ADDefaultDomainPasswordPolicy</code></td>
+</tr>
+<tr>
+<td>Fine-grained политика</td>
+<td><code>domain passwordsettings pso</code></td>
+<td><code>New-ADFineGrainedPasswordPolicy</code></td>
+</tr>
+</tbody>
+</table>
+<p>Примеры (для домена с Windows DC или смешанного):</p>
+<pre><code class="language-powershell">New-ADUser -Name &quot;Иван Иванов&quot; -SamAccountName ivanov -UserPrincipalName ivanov@samdom.example.com `
+  -GivenName &quot;Иван&quot; -Surname &quot;Иванов&quot; -Path &quot;OU=Отделы,DC=samdom,DC=example,DC=com&quot; `
+  -AccountPassword (ConvertTo-SecureString 'Str0ng!Passw0rd' -AsPlainText -Force) `
+  -Enabled $true -ChangePasswordAtLogon $true
+
+Get-ADUser -Filter * -SearchBase &quot;OU=Отделы,DC=samdom,DC=example,DC=com&quot; -Properties mail,uidNumber |
+  Select-Object SamAccountName, Name, mail, uidNumber
+
+Add-ADGroupMember -Identity it -Members ivanov,petrov
+Get-ADGroupMember -Identity it -Recursive | Select-Object Name, SamAccountName
+
+Set-ADAccountPassword -Identity ivanov -Reset -NewPassword (ConvertTo-SecureString 'N3w!Passw0rd' -AsPlainText -Force)
+Unlock-ADAccount -Identity ivanov
+Move-ADObject -Identity &quot;CN=Иван Иванов,OU=Отделы,DC=samdom,DC=example,DC=com&quot; -TargetPath &quot;OU=IT,DC=samdom,DC=example,DC=com&quot;
+</code></pre>
+<h2>PowerShell через LDAP: рабочий обход для Samba</h2>
+<p>Чтение (DirectoryServices.Protocols):</p>
+<pre><code class="language-powershell">$cred = New-Object System.Net.NetworkCredential('STAND\mininode2admin', 'Пароль')
+$ldap = New-Object System.DirectoryServices.Protocols.LdapConnection('dc1.stand.local:389')
+$ldap.AuthType = [System.DirectoryServices.Protocols.AuthType]::Basic
+$ldap.Credential = $cred
+$ldap.Bind()
+
+$req = New-Object System.DirectoryServices.Protocols.SearchRequest(
+  'OU=MiniNode1,DC=stand,DC=local', '(objectClass=user)',
+  [System.DirectoryServices.Protocols.SearchScope]::OneLevel)
+$resp = $ldap.SendRequest($req)
+foreach ($e in $resp.Entries) { $e.DistinguishedName }
+</code></pre>
+<p>ADSI (проще для чтения свойств):</p>
+<pre><code class="language-powershell">$searcher = New-Object System.DirectoryServices.DirectorySearcher
+$searcher.SearchRoot = [ADSI]&quot;LDAP://OU=MiniNode1,DC=stand,DC=local&quot;
+$searcher.Filter = '(objectClass=user)'
+$searcher.PageSize = 1000
+$searcher.FindAll() | ForEach-Object { $_.Properties['distinguishedname'][0] }
+</code></pre>
+<p>Запись пароля через LDAP требует защищённого канала (LDAPS/StartTLS): атрибут <code>unicodePwd</code> принимается только по TLS, иначе <code>LDAP_SERVER_UNAVAILABLE</code>/<code>unwilling to perform</code>.</p>
+<h2>Ключевые атрибуты AD-объектов (данные)</h2>
+<h3>Идентификаторы</h3>
+<table>
+<thead>
+<tr>
+<th>Атрибут</th>
+<th>Что это</th>
+<th>Пример</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>distinguishedName</code></td>
+<td>полный DN объекта</td>
+<td><code>CN=ivanov,OU=Отделы,DC=samdom,DC=example,DC=com</code></td>
+</tr>
+<tr>
+<td><code>objectGUID</code></td>
+<td>неизменный GUID объекта (переживает переименование/перемещение)</td>
+<td><code>{4a6b...}</code></td>
+</tr>
+<tr>
+<td><code>objectSid</code></td>
+<td>SID: <code>S-1-5-21-&lt;domain&gt;-&lt;rid&gt;</code></td>
+<td><code>S-1-5-21-1004336348-...-1105</code></td>
+</tr>
+<tr>
+<td><code>sAMAccountName</code></td>
+<td>логин (≤20 символов)</td>
+<td><code>ivanov</code></td>
+</tr>
+<tr>
+<td><code>userPrincipalName</code></td>
+<td>UPN для входа</td>
+<td><code>ivanov@samdom.example.com</code></td>
+</tr>
+</tbody>
+</table>
+<h3>Учётная запись</h3>
+<table>
+<thead>
+<tr>
+<th>Атрибут</th>
+<th>Что это</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>userAccountControl</code></td>
+<td>битовая маска состояния: 512 — обычная включённая учётка, 514 — отключённая (512+2), 66048 — пароль не истекает (512+65536), 66050 — отключена + пароль не истекает</td>
+</tr>
+<tr>
+<td><code>pwdLastSet</code></td>
+<td>время установки пароля (FILETIME; 0 — «сменить при следующем входе»)</td>
+</tr>
+<tr>
+<td><code>accountExpires</code></td>
+<td>срок действия (FILETIME; 0 и 9223372036854775807 — бессрочно)</td>
+</tr>
+<tr>
+<td><code>lastLogonTimestamp</code></td>
+<td>время последнего входа (реплицируется, точность до ~14 дней)</td>
+</tr>
+<tr>
+<td><code>logonHours</code></td>
+<td>разрешённые часы входа (битовая строка)</td>
+</tr>
+<tr>
+<td><code>msDS-User-Account-Control-Computed</code></td>
+<td>вычисляемые флаги (например, LOCKED_OUT)</td>
+</tr>
+</tbody>
+</table>
+<h3>Группы</h3>
+<table>
+<thead>
+<tr>
+<th>Атрибут</th>
+<th>Что это</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>groupType</code></td>
+<td>тип/область: Global Security = -2147483646, Domain Local Security = -2147483644, Universal Security = -2147483640; Distribution: 2 / 4 / 8</td>
+</tr>
+<tr>
+<td><code>member</code> / <code>memberOf</code></td>
+<td>состав группы (прямой) / прямые группы объекта</td>
+</tr>
+<tr>
+<td><code>primaryGroupID</code></td>
+<td>первичная группа (обычно 513 = Domain Users); в Samba менять без нужды не стоит</td>
+</tr>
+<tr>
+<td><code>isCriticalSystemObject</code></td>
+<td>защищённая системная группа (не удалять)</td>
+</tr>
+</tbody>
+</table>
+<h3>Unix / RFC2307</h3>
+<table>
+<thead>
+<tr>
+<th>Атрибут</th>
+<th>Что это</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>uidNumber</code>, <code>gidNumber</code></td>
+<td>Unix uid/gid (нужны для бэкенда <code>idmap ad</code>)</td>
+</tr>
+<tr>
+<td><code>loginShell</code>, <code>unixHomeDirectory</code></td>
+<td>оболочка и домашний каталог</td>
+</tr>
+<tr>
+<td><code>gecos</code></td>
+<td>описание пользователя</td>
+</tr>
+<tr>
+<td><code>unixPrimaryGroup</code></td>
+<td>первичная Unix-группа (в Samba задаётся через <code>unix_primary_group = yes</code>)</td>
+</tr>
+</tbody>
+</table>
+<h3>Kerberos и делегирование</h3>
+<table>
+<thead>
+<tr>
+<th>Атрибут</th>
+<th>Что это</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>servicePrincipalName</code></td>
+<td>SPN (например, <code>HTTP/websrv.samdom.example.com</code>)</td>
+</tr>
+<tr>
+<td><code>msDS-AllowedToDelegateTo</code></td>
+<td>список сервисов для ограниченного делегирования</td>
+</tr>
+<tr>
+<td><code>msDS-AllowedToActOnBehalfOfOtherIdentity</code></td>
+<td>RBCD: кто может действовать от имени этого аккаунта</td>
+</tr>
+<tr>
+<td><code>msDS-KeyCredentialLink</code></td>
+<td>ключи Windows Hello for Business / KeyTrust</td>
+</tr>
+<tr>
+<td><code>altSecurityIdentities</code></td>
+<td>альтернативные привязки сертификатов (strong binding)</td>
+</tr>
+</tbody>
+</table>
+<h3>Политики</h3>
+<table>
+<thead>
+<tr>
+<th>Атрибут</th>
+<th>Что это</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>gPCFileSysPath</code></td>
+<td>путь к GPO в SYSVOL (<code>\\samdom.example.com\sysvol\...</code>)</td>
+</tr>
+<tr>
+<td><code>msDS-PasswordSettings</code></td>
+<td>объект fine-grained Password Settings</td>
+</tr>
+<tr>
+<td><code>msDS-Behavior-Version</code></td>
+<td>функциональный уровень: 0=2000, 1=2003, 2=2008, 3=2008 R2, 4=2012, 5=2012 R2, 6=2016, 7=2025 (Samba поддерживает до 2008 R2, выше — экспериментально)</td>
+</tr>
+</tbody>
+</table>
+<h3>Well-known SIDs и встроенные группы</h3>
+<table>
+<thead>
+<tr>
+<th>SID</th>
+<th>Группа / учётка</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>S-1-5-32-544</code></td>
+<td>BUILTIN\Administrators</td>
+</tr>
+<tr>
+<td><code>S-1-5-32-545</code></td>
+<td>BUILTIN\Users</td>
+</tr>
+<tr>
+<td><code>S-1-5-32-546</code></td>
+<td>BUILTIN\Guests</td>
+</tr>
+<tr>
+<td><code>S-1-5-32-548</code></td>
+<td>BUILTIN\Account Operators</td>
+</tr>
+<tr>
+<td><code>S-1-5-32-549</code></td>
+<td>BUILTIN\Server Operators</td>
+</tr>
+<tr>
+<td><code>S-1-5-32-550</code></td>
+<td>BUILTIN\Print Operators</td>
+</tr>
+<tr>
+<td><code>S-1-5-32-551</code></td>
+<td>BUILTIN\Backup Operators</td>
+</tr>
+<tr>
+<td><code>S-1-5-21-&lt;domain&gt;-500</code></td>
+<td>Administrator</td>
+</tr>
+<tr>
+<td><code>S-1-5-21-&lt;domain&gt;-501</code></td>
+<td>Guest</td>
+</tr>
+<tr>
+<td><code>S-1-5-21-&lt;domain&gt;-502</code></td>
+<td>krbtgt</td>
+</tr>
+<tr>
+<td><code>S-1-5-21-&lt;domain&gt;-512</code></td>
+<td>Domain Admins</td>
+</tr>
+<tr>
+<td><code>S-1-5-21-&lt;domain&gt;-513</code></td>
+<td>Domain Users</td>
+</tr>
+<tr>
+<td><code>S-1-5-21-&lt;domain&gt;-515</code></td>
+<td>Domain Computers</td>
+</tr>
+<tr>
+<td><code>S-1-5-21-&lt;domain&gt;-516</code></td>
+<td>Domain Controllers</td>
+</tr>
+<tr>
+<td><code>S-1-5-21-&lt;domain&gt;-518</code></td>
+<td>Schema Admins</td>
+</tr>
+<tr>
+<td><code>S-1-5-21-&lt;domain&gt;-519</code></td>
+<td>Enterprise Admins</td>
+</tr>
+<tr>
+<td><code>S-1-5-21-&lt;domain&gt;-520</code></td>
+<td>Group Policy Creator Owners</td>
+</tr>
+</tbody>
+</table>
+<h2>Практические выборки</h2>
+<p>Модуль AD (только при наличии ADWS/Windows DC):</p>
+<pre><code class="language-powershell"># пользователи без почты
+Get-ADUser -Filter * -Properties mail | Where-Object { -not $_.mail }
+
+# экспорт в CSV
+Get-ADUser -Filter * -Properties mail,uidNumber,lastLogonTimestamp |
+  Select-Object SamAccountName, Name, mail, uidNumber, lastLogonTimestamp |
+  Export-Csv users.csv -NoTypeInformation -Encoding UTF8
+
+# отключённые учётки, которые не входили 90 дней
+Search-ADAccount -AccountDisabled -UsersOnly |
+  Where-Object { $_.LastLogonDate -lt (Get-Date).AddDays(-90) }
+</code></pre>
+<p>Без ADWS (Samba): те же выборки через <code>ldbsearch</code>/<code>ldapsearch</code> (см. <a href="%D0%A3%D0%BF%D1%80%D0%B0%D0%B2%D0%BB%D0%B5%D0%BD%D0%B8%D0%B5-%D0%BF%D0%BE%D0%BB%D1%8C%D0%B7%D0%BE%D0%B2%D0%B0%D1%82%D0%B5%D0%BB%D1%8F%D0%BC%D0%B8-%D0%B3%D1%80%D1%83%D0%BF%D0%BF%D0%B0%D0%BC%D0%B8-%D0%B8-OU.html">Управление пользователями группами и OU</a>) или PowerShell + LDAP (выше).</p>
+<h2>Подводные камни</h2>
+<ul>
+<li><strong>ADWS — ключевое ограничение:</strong> в Samba его нет (bug 11231, NEW), поэтому модуль ActiveDirectory против Samba DC не работает; не тратьте время на <code>Get-ADUser -Server samba-dc</code>.</li>
+<li><strong>Атрибуты схемы:</strong> часть атрибутов Windows (claims, central access policy, msDS-KeyCredentialLink на старых версиях) в Samba отсутствует или поддерживается частично — проверяйте версию.</li>
+<li><strong><code>userAccountControl</code> нельзя менять «в лоб»:</strong> используйте <code>Set-ADAccountControl</code> / <code>Enable-ADAccount</code>, иначе легко получить противоречивые флаги.</li>
+<li><strong><code>objectSid</code> и <code>objectGUID</code> неизменяемы</strong> — не пытайтесь их «исправить»; SID задаёт права, GUID — ссылки.</li>
+<li><strong><code>sAMAccountName</code> ≤ 20 символов</strong>; UPN должен быть в допустимом суффиксе леса.</li>
+<li><strong><code>unicodePwd</code> только по TLS</strong> (LDAPS/StartTLS) — иначе запись пароля отклоняется.</li>
+<li><strong><code>primaryGroupID</code></strong> не меняйте без необходимости: Windows и Samba рассчитывают на членство всех в Domain Users (в Samba смена ломает поведение).</li>
+<li><strong>GPO через GPMC работает, ADAC — нет</strong> (ADAC тоже требует ADWS).</li>
+<li><strong>PowerShell 7:</strong> модуль ActiveDirectory требует Windows PowerShell 5.1 (совместимость через <code>-UseWindowsPowerShell</code>).</li>
+</ul>
+<h2>Источники</h2>
+<ul>
+<li>Microsoft Learn: модуль <a href="https://learn.microsoft.com/en-us/powershell/module/activedirectory/">ActiveDirectory</a> — перечень командлетов и параметров (сверено по страницам командлетов).</li>
+<li>Samba Bugzilla: <a href="https://bugzilla.samba.org/show_bug.cgi?id=11231">bug 11231 — Active Directory Web Services (ADWS) should be supported</a>, статус NEW — ADWS в Samba не реализован.</li>
+<li>Схема AD (атрибуты) — MS-ADTS/MS-ADA; значения флагов <code>userAccountControl</code> и <code>groupType</code> — стандартные константы Windows.</li>
+<li>Совместимость RSAT с Samba — Samba Wiki (страницы о Windows-клиентах и RSAT).</li>
+</ul>
+<h2>Связанные заметки</h2>
+<ul>
+<li><a href="%D0%A3%D0%BF%D1%80%D0%B0%D0%B2%D0%BB%D0%B5%D0%BD%D0%B8%D0%B5-%D0%BF%D0%BE%D0%BB%D1%8C%D0%B7%D0%BE%D0%B2%D0%B0%D1%82%D0%B5%D0%BB%D1%8F%D0%BC%D0%B8-%D0%B3%D1%80%D1%83%D0%BF%D0%BF%D0%B0%D0%BC%D0%B8-%D0%B8-OU.html">Управление пользователями группами и OU</a></li>
+<li><a href="Idmap-%D0%B1%D1%8D%D0%BA%D0%B5%D0%BD%D0%B4%D1%8B-%D0%B8-RFC2307.html">Idmap бэкенды и RFC2307</a></li>
+<li><a href="%D0%93%D1%80%D1%83%D0%BF%D0%BF%D0%BE%D0%B2%D1%8B%D0%B5-%D0%9F%D0%BE%D0%BB%D0%B8%D1%82%D0%B8%D0%BA%D0%B8-GPO.html">Групповые Политики GPO</a></li>
+<li><a href="%D0%94%D0%BE%D0%B2%D0%B5%D1%80%D0%B8%D1%82%D0%B5%D0%BB%D1%8C%D0%BD%D1%8B%D0%B5-%D0%BE%D1%82%D0%BD%D0%BE%D1%88%D0%B5%D0%BD%D0%B8%D1%8F-%D0%BC%D0%B5%D0%B6%D0%B4%D1%83-%D0%B4%D0%BE%D0%BC%D0%B5%D0%BD%D0%B0%D0%BC%D0%B8.html">Доверительные отношения между доменами</a></li>
+<li><a href="%D0%A3%D1%81%D1%82%D0%B0%D0%BD%D0%BE%D0%B2%D0%BA%D0%B0-Samba-AD-DC.html">Установка Samba AD DC</a></li>
+</ul>
+</main>
+</body>
+</html>

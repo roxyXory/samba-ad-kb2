@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Samba как член домена</title>
+<link rel="stylesheet" href="../style.css">
+</head>
+<body>
+<nav><a href="../index.html">База знаний Samba AD DC</a></nav>
+<main><h1>Samba как член домена</h1>
+<h2>Суть</h2>
+<p>Член домена (domain member) — это Linux-машина с Samba, введённая в домен и не предоставляющая доменных служб (в отличие от DC). На ней можно использовать доменных пользователей и группы в локальных ACL, поднимать файловые и print-сервисы и через PAM давать доменным пользователям локальный вход. Страница описывает подготовку хоста (DNS, Kerberos, время, имя хоста), выбор idmap-бэкенда, ввод в домен, настройку NSS и запуск служб.</p>
+<h2>Ключевое</h2>
+<h3>Требования и общая подготовка</h3>
+<ul>
+<li>Все члены AD-домена должны быть в одном DNS-домене, а Realm — это DNS-домен в верхнем регистре: DNS-домен <code>samdom.example.com</code>, Realm <code>SAMDOM.EXAMPLE.COM</code>.</li>
+<li>Для Samba ранее 4.15.0 <strong>никогда</strong> не использовать <code>samba-tool domain provision</code> для создания Unix-члена домена — только процедура с этой страницы.</li>
+<li>Убедиться, что не запущены процессы Samba:</li>
+</ul>
+<pre><code># ps ax | egrep &quot;samba|smbd|nmbd|winbindd&quot;
+</code></pre>
+<ul>
+<li>Если на хосте ранее была установка Samba: сделать резервную копию <code>smb.conf</code> (путь показывает <code># smbd -b | grep &quot;CONFIGFILE&quot;</code>) и удалить все файлы баз Samba (<code>*.tdb</code>, <code>*.ldb</code>; папки показывает <code># smbd -b | egrep &quot;LOCKDIR|STATEDIR|CACHEDIR|PRIVATE_DIR&quot;</code>).</li>
+</ul>
+<h3>Настройка DNS (/etc/resolv.conf)</h3>
+<pre><code>nameserver 10.99.0.1
+search samdom.example.com
+</code></pre>
+<p>NetworkManager может перезаписать этот файл — постоянную настройку делают через nmcli или графический интерфейс (видимый <code>/etc/resolv.conf</code> с <code>nameserver 127.0.0.53</code> при этом работает корректно).</p>
+<p>Проверки разрешения имён:</p>
+<pre><code># nslookup DC1.samdom.example.com
+# host DC1.samdom.example.com        # прямой lookahead
+# nslookup 10.99.0.1                 # обратный lookahead
+# host -t SRV _ldap._tcp.samdom.example.com   # SRV-записи
+</code></pre>
+<p>Типичные ошибки: <code>** server can't find DC1.samdom.example.com: NXDOMAIN</code> и <code>;; connection timed out; no servers could be reached</code> (используемый DNS-сервер недоступен).</p>
+<h3>Настройка Kerberos (/etc/krb5.conf)</h3>
+<pre><code>[libdefaults]
+	default_realm = SAMDOM.EXAMPLE.COM
+	dns_lookup_realm = false
+	dns_lookup_kdc = true
+</code></pre>
+<p>Команда Samba рекомендует не задавать других параметров в <code>/etc/krb5.conf</code>. Если файл содержит строку <code>include</code> — она не будет работать, её нужно удалить. На некоторых дистрибутивах с MIT Kerberos для корректного маппинга ID нужно добавить:</p>
+<pre><code>[plugins]
+       localauth = {
+             module = winbind:/usr/lib64/samba/krb5/winbind_krb5_localauth.so
+             enable_only = winbind
+       }
+</code></pre>
+<p>Эти же настройки могут понадобиться в <code>/etc/security/pam_winbind.conf</code>:</p>
+<pre><code>[global]
+      krb5_auth = yes
+      krb5_ccache_type = FILE
+</code></pre>
+<p>На дистрибутивах с crypto-policies:</p>
+<pre><code>update-crypto-policies --set DEFAULT:AD-SUPPORT
+</code></pre>
+<h3>Время и имя хоста</h3>
+<ul>
+<li>Kerberos требует синхронизированного времени на всех членах домена — рекомендуется NTP-клиент (см. <a href="%D0%A1%D0%B8%D0%BD%D1%85%D1%80%D0%BE%D0%BD%D0%B8%D0%B7%D0%B0%D1%86%D0%B8%D1%8F-%D0%B2%D1%80%D0%B5%D0%BC%D0%B5%D0%BD%D0%B8.html">Синхронизация времени</a>).</li>
+<li>Проверить разрешение имени хоста: <code># getent hosts M1</code> — имя и FQDN не должны разрешаться в <code>127.0.0.1</code> или любой другой IP, кроме адреса LAN-интерфейса. При необходимости прописать в <code>/etc/hosts</code>:</li>
+</ul>
+<pre><code>127.0.0.1      localhost
+10.99.0.5      M1.samdom.example.com    M1
+</code></pre>
+<p>Алиасы имени машины добавляются в конец строки с IP-адресом машины, а не в строку <code>127.0.0.1</code>. Для ввода в NT4-домен подготовка не требуется.</p>
+<h3>Выбор idmap-бэкенда</h3>
+<p>Три основных бэкенда: <code>ad</code>, <code>autorid</code>, <code>rid</code>.</p>
+<ul>
+<li>Нужны одинаковые ID везде и/или разные shell и домашние каталоги — бэкенд <code>ad</code> + RFC2307-атрибуты в AD (uidNumber, gidNumber и т.д.). Атрибуты <strong>не добавляются автоматически</strong>, их нужно задавать вручную. ID из диапазона 3000000, которые видно на DC, — НЕ RFC2307-атрибуты и на Unix-членах использоваться не могут.</li>
+<li>Нужны только Unix ID — бэкенды <code>rid</code> или <code>autorid</code>: ID вычисляются из Windows RID; при одинаковом <code>[global]</code> в smb.conf на всех членах ID совпадают; RFC2307-атрибуты игнорируются; через <code>template shell</code> и <code>template homedir</code> можно задать shell и домашний каталог (по умолчанию <code>/bin/false</code> и <code>/home/%D/%U</code>).</li>
+<li>Бэкенд <code>hash</code> — в таблице страницы помечен «Do not use», не использовать.</li>
+</ul>
+<p>Локальные системные пользователи занимают диапазон 0-999, локальные Unix-пользователи обычно с 1000. Рекомендуемые непересекающиеся диапазоны <code>idmap config</code>:</p>
+<table>
+<thead>
+<tr>
+<th>Домен</th>
+<th>Диапазон</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>*</code> (default domain)</td>
+<td>3000-7999</td>
+</tr>
+<tr>
+<td>DOMAIN</td>
+<td>10000-999999</td>
+</tr>
+<tr>
+<td>TRUSTED (доверенные)</td>
+<td>1000000-9999999</td>
+</tr>
+</tbody>
+</table>
+<p>Диапазоны <code>*</code> и DOMAIN не должны начинаться с 999 или меньше и не должны пересекаться; вариант «<code>*</code> на всё» годится только для бэкенда <code>autorid</code>. Для каждого доверенного домена добавляется отдельная конфигурация ID mapping (кроме <code>autorid</code>, где это опционально).</p>
+<p>Полный пример smb.conf на этой странице не приводится — базовый файл собирается по вики-странице выбранного бэкенда (<code>idmap config rid</code> / <code>idmap config autorid</code> / <code>idmap config ad</code>); примеры конфигурации всех трёх бэкендов, требования к диапазонам и включение RFC2307-атрибутов в AD — в <a href="Idmap-%D0%B1%D1%8D%D0%BA%D0%B5%D0%BD%D0%B4%D1%8B-%D0%B8-RFC2307.html">Idmap бэкенды и RFC2307</a>.</p>
+<h3>Маппинг Administrator → root</h3>
+<ul>
+<li>В раздел <code>[global]</code> smb.conf:</li>
+</ul>
+<pre><code>username map = /usr/local/samba/etc/user.map
+</code></pre>
+<ul>
+<li>Создать файл <code>/usr/local/samba/etc/user.map</code>:</li>
+</ul>
+<pre><code>!root = SAMDOM\Administrator
+</code></pre>
+<p>Делать это можно <strong>только на Unix-члене домена</strong>; после настройки не входить на член домена под Administrator. Если имя аккаунта Administrator меняли — в user.map используется новое имя.</p>
+<h3>Ввод в домен</h3>
+<pre><code># net ads join -U administrator
+Enter administrator's password: Passw0rd
+Using short domain name -- SAMDOM
+Joined 'M1' to dns domain 'samdom.example.com'
+</code></pre>
+<p>Для NT4-домена:</p>
+<pre><code># net rpc join -U administrator
+</code></pre>
+<p>Только для Samba ≥ 4.15.0:</p>
+<pre><code># samba-tool domain join samdom.example.com MEMBER -U administrator
+</code></pre>
+<p>При <code>net ads join</code> прямая DNS-запись компьютера создаётся автоматически, но при фиксированном IP-адресе обратную PTR-запись нужно создать самостоятельно. При проблемах ввода — <a href="%D0%94%D0%B8%D0%B0%D0%B3%D0%BD%D0%BE%D1%81%D1%82%D0%B8%D0%BA%D0%B0-AD-DC.html">Диагностика AD DC</a> и страница Troubleshooting Samba Domain Members.</p>
+<h3>Name Service Switch (/etc/nsswitch.conf)</h3>
+<pre><code>passwd: files winbind
+group:  files winbind
+</code></pre>
+<ul>
+<li>Запись <code>files</code> остаётся первой в обеих базах.</li>
+<li>Не добавлять <code>winbind</code> в базу <code>shadow</code> — это может привести к отказу <code>wbinfo</code>.</li>
+<li>Если есть строка с директивой <code>initgroups</code>, добавить <code>[success=continue] winbind</code>; если строки нет — не создавать её.</li>
+<li>При самостоятельной сборке Samba нужны симлинки libnss_winbind в библиотечный путь ОС (см. libnss_winbind Links); у пакетной установки ссылка обычно создаётся автоматически.</li>
+</ul>
+<h3>Запуск служб</h3>
+<p>Полноценный Unix-член домена требует служб: <code>smbd</code>, <code>nmbd</code> (не нужна без Network Browsing), <code>winbindd</code>. Службу <code>samba</code> на члене домена запускать нельзя — она нужна только на DC. Samba не поставляет init-скрипты/systemd-юниты: при пакетной установке используется скрипт из пакета, при сборке из исходников — документация дистрибутива. Начиная с Samba 4.11.0 минимальный протокол — SMBv2; SMBv1 не работает, если вручную не задать <code>client min protocol = NT1</code> и <code>server min protocol = NT1</code> (Samba больше не рекомендует SMBv1).</p>
+<h3>Проверка winbindd</h3>
+<pre><code># wbinfo --ping-dc
+checking the NETLOGON for domain[SAMDOM] dc connection to &quot;DC.SAMDOM.EXAMPLE.COM&quot; succeeded
+</code></pre>
+<p>Если команда не проходит — проверить, что <code>winbindd</code> запущен и smb.conf настроен верно. Поиск доменных учёток через NSS:</p>
+<pre><code># getent passwd SAMDOM\\demo01
+SAMDOM\demo01:*:10000:10000:demo01:/home/demo01:/bin/bash
+</code></pre>
+<pre><code># getent group &quot;SAMDOM\\Domain Users&quot;
+SAMDOM\domain users:x:10000:
+</code></pre>
+<p>Назначение владельца файла доменным пользователем и группой:</p>
+<pre><code># chown &quot;SAMDOM\\demo01:SAMDOM\\domain users&quot; file.txt
+</code></pre>
+<h2>Подводные камни</h2>
+<ul>
+<li><strong>Samba &lt; 4.15.0:</strong> <code>samba-tool domain provision</code> нельзя использовать для создания Unix-члена домена — не сработает.</li>
+<li><strong>Никогда не добавлять строки <code>idmap config</code> в smb.conf на Samba AD DC</strong> — ID mapping back end на DC не поддерживается.</li>
+<li><strong>Не маппить Administrator → root на DC:</strong> он уже замаплен в idmap.ldb, такой маппинг сломает AD. На Unix-члене после маппинга не входить под Administrator. С бэкендом <code>ad</code> никогда не задавать uidNumber аккаунту Administrator — значение перекроет локальный UID 0 (root) и маппинг не сработает.</li>
+<li><strong>Не дублировать имена:</strong> не использовать в локальном <code>/etc/passwd</code> те же имена пользователей, что в домене; не использовать локальные Unix-имена при смене владельца файлов на доменных шарах.</li>
+<li><strong>NetworkManager</strong> может перезаписать ручные правки <code>/etc/resolv.conf</code>.</li>
+<li><strong>Обратная зона</strong> в Samba AD не создаётся автоматически; при фиксированном IP PTR-запись создаётся вручную.</li>
+<li>Имя хоста и FQDN <strong>не должны разрешаться в 127.0.0.1</strong>.</li>
+<li>Если в <code>/etc/krb5.conf</code> есть строка <code>include</code> — она не работает, её нужно удалить.</li>
+<li>Диапазоны <code>idmap config</code> не должны пересекаться и не должны начинаться с 999 или меньше.</li>
+<li>Не запускать службу <code>samba</code> на члене домена — только <code>smbd</code>, <code>nmbd</code>, <code>winbindd</code>.</li>
+<li>Не добавлять <code>winbind</code> в базу <code>shadow</code> в <code>/etc/nsswitch.conf</code> — может сломать <code>wbinfo</code>.</li>
+</ul>
+<h2>Связанные заметки</h2>
+<ul>
+<li><a href="%D0%A3%D1%81%D1%82%D0%B0%D0%BD%D0%BE%D0%B2%D0%BA%D0%B0-Samba-AD-DC.html">Установка Samba AD DC</a> — развёртывание контроллера домена, к которому затем вводятся члены</li>
+<li><a href="%D0%9E%D0%B1%D1%89%D0%B8%D0%B9-%D1%80%D0%B5%D1%81%D1%83%D1%80%D1%81-%D1%81-Windows-ACL.html">Общий ресурс с Windows ACL</a> — файловые шары на члене домена</li>
+<li><a href="%D0%A1%D0%B8%D0%BD%D1%85%D1%80%D0%BE%D0%BD%D0%B8%D0%B7%D0%B0%D1%86%D0%B8%D1%8F-%D0%B2%D1%80%D0%B5%D0%BC%D0%B5%D0%BD%D0%B8.html">Синхронизация времени</a> — обязательная синхронизация времени для Kerberos</li>
+<li><a href="%D0%92%D0%BD%D1%83%D1%82%D1%80%D0%B5%D0%BD%D0%BD%D0%B8%D0%B9-DNS-%D0%B1%D1%8D%D0%BA%D0%B5%D0%BD%D0%B4.html">Внутренний DNS бэкенд</a> — DNS-сервер AD, на который указывает resolv.conf члена домена</li>
+</ul>
+</main>
+</body>
+</html>

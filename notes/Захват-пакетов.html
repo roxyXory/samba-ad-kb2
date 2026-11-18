@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Захват пакетов (Capture Packets)</title>
+<link rel="stylesheet" href="../style.css">
+</head>
+<body>
+<nav><a href="../index.html">База знаний Samba AD DC</a></nav>
+<main><h1>Захват пакетов (Capture Packets)</h1>
+<h2>Суть</h2>
+<p>Страница описывает, как снимать сетевые дампы (packet capture / trace) для диагностики проблем с Samba — именно их запрашивают разработчики Samba при разборе бага. Приведены команды для tshark, tcpdump и snoop, рекомендации, где снимать дамп (на клиенте или сервере), как фильтровать SMB-трафик по порту 445 и как захватить начало SMB-соединения.</p>
+<h2>Ключевое</h2>
+<h3>Какой инструмент использовать</h3>
+<ul>
+<li>Лучший способ зависит от доступных инструментов; дополнительные сведения — в документации к каждому инструменту.</li>
+<li><strong>tshark</strong> (CLI-версия Wireshark) — пример захвата на хосте <code>samba3</code>:</li>
+</ul>
+<pre><code class="language-bash">tshark -i eth0 -w FILENAME.pcap
+</code></pre>
+<p>Файл FILENAME.pcap затем отправляется разработчикам.</p>
+<ul>
+<li><strong>tcpdump</strong> — доступен практически везде, есть порты под Windows:</li>
+</ul>
+<pre><code class="language-bash">tcpdump -i eth0 -w FILENAME.pcap
+</code></pre>
+<ul>
+<li><strong>snoop</strong> — стандартный инструмент Solaris:</li>
+</ul>
+<pre><code class="language-bash">snoop -o FILENAME.pcap -d eth0
+</code></pre>
+<h3>Где запускать захват</h3>
+<ul>
+<li>Трассировку нужно запускать на <strong>клиенте</strong> или на <strong>сервере</strong> — зависит от проблемы:
+<ul>
+<li><strong>Аутентификация / проблемная работа с AD</strong> → снимать на <strong>сервере</strong>, чтобы увидеть весь диалог между клиентом и DC.</li>
+<li><strong>Обмен файлами</strong> → дамп можно снимать на любой из сторон.</li>
+<li>Если трассировка получается слишком большой/нагруженной (например, участвуют машины из других подсетей) → снимать на <strong>клиенте</strong>, чтобы ограничить трафик только одной машиной.</li>
+</ul>
+</li>
+</ul>
+<h3>Общий порядок действий</h3>
+<ol>
+<li>Запустите инструмент захвата с подходящими параметрами.</li>
+<li>Воспроизведите проблему (лучше с минимальным числом посторонних действий).</li>
+<li>Остановите захват и приложите полученный файл FILENAME.pcap к отчёту об ошибке.</li>
+</ol>
+<h3>Фильтрация только SMB-трафика</h3>
+<ul>
+<li>Пример с tcpdump (аналогично для других инструментов):</li>
+</ul>
+<pre><code class="language-bash">tcpdump -w FILENAME.pcap port 445
+</code></pre>
+<ul>
+<li>Трафик конкретного клиента:</li>
+</ul>
+<pre><code class="language-bash">tcpdump -w FILENAME.pcap host IP_ADDRESS_OF_THE_CLIENT
+</code></pre>
+<ul>
+<li>Возможности фильтрации: подробности в <code>man tcpdump</code>, <code>man pcap-filter</code> (в старых версиях <code>man tcpdump</code> упоминал <code>man netman</code>).</li>
+</ul>
+<h3>Кольцевой буфер в tcpdump</h3>
+<p>Пример длительного захвата в кольцевой буфер:</p>
+<pre><code class="language-bash">tcpdump -W 10 -C 50 -w smb.pcap -s 0 port 445
+</code></pre>
+<ul>
+<li><code>-W 10</code> — максимальное число файлов (<code>-W</code>: &quot;Number of files&quot;).</li>
+<li><code>-C 50</code> — размер файла в мегабайтах (<code>-C</code>: &quot;size in MB&quot;).</li>
+</ul>
+<h3>Захват через GUI (Wireshark)</h3>
+<ol>
+<li>Запустите Wireshark на клиенте или на сервере.</li>
+<li>В меню <strong>Capture → Options</strong> выберите интерфейс и параметры.</li>
+<li>Нажмите <strong>Start</strong> для начала захвата.</li>
+<li>Воспроизведите проблему.</li>
+<li>Остановите захват (<strong>Capture → Stop</strong>) и сохраните результат.</li>
+</ol>
+<h3>Как захватить начало SMB-соединения</h3>
+<ul>
+<li>Для некоторых проблем нужно начало соединения SMB; просто запустить трассировку и ждать не получится — соединение может быть уже установлено.</li>
+<li>Найти процесс <code>smbd</code>, обслуживающий проблемный клиент (вывод команды <code>smbstatus</code>), и завершить его — перезапускать всю Samba не обязательно.</li>
+<li>Клиент автоматически переподключится, и начало соединения попадёт в дамп.</li>
+</ul>
+<h3>Kerberos: расшифровка трафика</h3>
+<ul>
+<li>Основная часть сетевого трафика в домене <strong>зашифрована</strong>, поэтому в дампе нужен начальный обмен ключами.</li>
+<li>Заставьте Windows сбросить уже имеющиеся билеты Kerberos, чтобы новый диалог попал в трассировку:
+<ul>
+<li><strong>Windows XP / Windows Server 2003:</strong> утилита <code>kerbtray.exe</code> из Resource Kit (входит в Windows Support Tools); правый клик по значку в трее → <strong>Purge tickets</strong>.</li>
+<li><strong>Windows Vista / Windows Server 2008 и новее:</strong> страница вики указывает <code>ktutil purge</code> — это дословно воспроизведённая ошибка источника: <code>ktutil</code> — инструмент MIT/Heimdal Kerberos для Unix, а штатная утилита Windows начиная с Vista — <code>klist.exe</code>, поэтому правильная команда — <code>klist purge</code>.</li>
+</ul>
+</li>
+</ul>
+<h2>Подводные камни</h2>
+<ul>
+<li>Большая часть трафика зашифрована: дамп бесполезен для анализа содержимого, если в нём нет начального обмена ключами Kerberos — перед захватом сбросьте билеты Kerberos на клиенте (см. выше).</li>
+<li>Снимаемый трафик может быть слишком велик и нагружать систему: если дамп на сервере получается слишком объёмным (много машин из разных подсетей), снимайте его на клиенте — там трафик ограничен одной машиной.</li>
+<li>Если проблема требует начала SMB-соединения, недостаточно просто начать запись: завершите процесс <code>smbd</code>, обслуживающий клиента (по данным <code>smbstatus</code>), — клиент переподключится сам; перезапускать Samba целиком не нужно.</li>
+</ul>
+<h2>Связанные заметки</h2>
+<ul>
+<li><a href="%D0%94%D0%B8%D0%B0%D0%B3%D0%BD%D0%BE%D1%81%D1%82%D0%B8%D0%BA%D0%B0-AD-DC.html">Диагностика AD DC</a></li>
+<li><a href="Wireshark-%D1%81-keytab.html">Wireshark с keytab</a></li>
+<li><a href="%D0%9F%D0%BE%D1%80%D1%82%D1%8B-AD-DC.html">Порты AD DC</a></li>
+<li><a href="%D0%A1%D0%BE%D0%BE%D0%B1%D1%89%D0%B5%D0%BD%D0%B8%D0%B5-%D0%BE%D0%B1-%D0%BE%D1%88%D0%B8%D0%B1%D0%BA%D0%B0%D1%85.html">Сообщение об ошибках</a></li>
+</ul>
+</main>
+</body>
+</html>

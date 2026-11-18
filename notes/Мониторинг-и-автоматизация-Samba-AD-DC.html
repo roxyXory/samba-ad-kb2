@@ -1,0 +1,249 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Мониторинг и автоматизация Samba AD DC</title>
+<link rel="stylesheet" href="../style.css">
+</head>
+<body>
+<nav><a href="../index.html">База знаний Samba AD DC</a></nav>
+<main><h1>Мониторинг и автоматизация Samba AD DC</h1>
+<h2>Суть</h2>
+<p>Регулярная проверка здоровья контроллеров домена Samba опирается на штатные подкоманды <code>samba-tool</code>: <code>drs showrepl</code> (статус репликации, с машинно-читаемыми режимами <code>--json</code> и <code>--summary</code>), <code>dbcheck --cross-ncs</code> (консистентность локальной базы — запускается на каждом DC отдельно, не по LDAP), <code>ldapcmp</code> (сравнение баз двух DC по LDAP) и <code>ntacl sysvolcheck</code> (ACL каталога SysVol и GPO). Для неинтерактивного запуска из скриптов пароль передаётся не через <code>--password</code>, а через переменные окружения <code>PASSWD</code>, <code>PASSWD_FD</code> или <code>PASSWD_FILE</code>. Автоматизацию удобно строить на Ansible: задачи вокруг AD DC закрывает community-коллекция <code>jomrr.samba</code> (нативные Python-биндинги, идемпотентность, check mode), объекты AD — общие модули <code>community.general.ldap_entry</code> / <code>ldap_attrs</code> / <code>ldap_passwd</code>; официальной коллекции от Samba Team в Ansible Galaxy нет.</p>
+<h2>Ключевое</h2>
+<h3>Проверка репликации: samba-tool drs showrepl</h3>
+<p>Команда <code>samba-tool drs showrepl</code> выводит входящие и исходящие соглашения репликации с другими DC леса; результат даётся с точки зрения того DC, на котором команда запущена (страница вики Verifying the Directory Replication Statuses):</p>
+<pre><code># samba-tool drs showrepl
+Default-First-Site-Name\DC2
+DSA Options: 0x00000001
+DSA object GUID: c14a774f-9732-4ec2-b9fa-2156c95c4e48
+DSA invocationId: 7bdb135c-6868-4dd9-9460-33dea4b6b87b
+
+==== INBOUND NEIGHBORS ====
+
+CN=Schema,CN=Configuration,DC=samdom,DC=example,DC=com
+       Default-First-Site-Name\DC1 via RPC
+               DSA object GUID: 4a6bd92a-6612-4b15-aa8c-9ec371e8994f
+               Last attempt @ Sat May 13 02:52:36 2017 CEST was successful
+               0 consecutive failure(s).
+               Last success @ Sat May 13 02:52:36 2017 CEST
+...
+</code></pre>
+<ul>
+<li>По умолчанию реплицируются контейнеры <code>DC=Forest_Root_Domain</code>, <code>CN=Configuration,...</code>, <code>CN=Schema,...</code>, <code>DC=ForestDnsZones,...</code>, <code>DC=DomainDnsZones,...</code>.</li>
+<li>KCC (knowledge consistency checker) не строит полносвязную топологию: после присоединения нового DC может пройти <strong>до 15 минут</strong>, пока KCC создаст connection objects и репликация по всем контейнерам начнётся. Поэтому пустой/неполный вывод сразу после join — не всегда авария.</li>
+<li>В секции <code>==== KCC CONNECTION OBJECTS ====</code> встречается предупреждение <code>Warning: No NC replicated for Connection!</code> — вики отсылает за разъяснением к FAQ (см. <a href="FAQ-Samba.html">FAQ Samba</a>).</li>
+<li>На Windows DC аналог — <code>repadmin /showrepl</code>; исходящую репликацию Windows не показывает, её смотрят через <code>showrepl</code> на Samba DC, куда реплицирует Windows DC.</li>
+</ul>
+<p>Режимы для скриптов (man-страница <code>samba-tool(8)</code> 4.25.0):</p>
+<blockquote>
+<p><code>drs showrepl</code> — Show replication status. The [--json] option results in JSON output, and with the [--summary] option produces very little output when the replication status seems healthy.</p>
+</blockquote>
+<ul>
+<li><code>--summary</code> — «very little output», пока репликация здорова; <code>--json</code> — JSON. Release notes Samba <strong>4.9.0</strong> (раздел «New samba-tool options for diagnosing DRS replication issues»): «With --summary, the command says very little when DRS replication is working well. With --json, JSON is produced. These options are intended for human and machine audiences, respectively.» В теге <strong>4.8.0</strong> этих опций в исходнике <code>python/samba/netcmd/drs.py</code> ещё нет — то есть для скриптов они доступны начиная с 4.9.0.</li>
+<li>Исходник 4.25.0 добавляет к ним не описанные в man-странице <code>--pull-summary</code> («Have we successfully replicated from all relevant servers?») и <code>--notify-summary</code> («Have we successfully notified all relevant servers of local changes…»), а также <code>--classic</code> (режим по умолчанию) и <code>-v/--verbose</code>.</li>
+<li><code>--summary</code> возвращает <strong>код выхода 1</strong>, если есть проблемные связи: он печатает <code>[ALL GOOD]</code> (зелёным), когда всё в порядке, иначе — <code>There are failing connections</code> с деталями и <code>return 1</code>. Проблемной считается не удалённая связь (<code>is deleted</code>) с <code>consecutive failures != 0</code> <strong>или</strong> <code>last success == 0</code> (исходник <code>python/samba/netcmd/drs.py</code>). Точка входа <code>samba-tool</code> завершается через <code>sys.exit(retval)</code>, поэтому этот код виден мониторингу (Nagios/check-скрипты, systemd-таймер).</li>
+<li>JSON (там же): объект содержит <code>dsa</code> (<code>options</code>, <code>objectGUID</code>, <code>invocationId</code>), массивы <code>repsFrom</code>/<code>repsTo</code> и <code>NTDSConnections</code>; ключи <code>site</code> и <code>server</code> из JSON <strong>удаляются</strong> при выводе. Элемент связи: <code>NC dn</code>, <code>DSA objectGUID</code>, <code>DSA</code>, <code>last attempt time</code>, <code>last attempt message</code>, <code>consecutive failures</code>, <code>last success</code>, <code>NTDS DN</code>, <code>is deleted</code>.</li>
+<li>Пример разбора (структура полей — из исходника, не из документации; <code>jq</code> — внешний инструмент):</li>
+</ul>
+<pre><code>samba-tool drs showrepl --json | jq '.repsFrom[] | select(.[&quot;consecutive failures&quot;] &gt; 0)'
+</code></pre>
+<ul>
+<li>Для оценки отставания репликации есть отдельные команды: <code>samba-tool drs uptodateness</code> (man-страница: <code>-H/--URL</code>, <code>-p/--partition</code>, <code>--json</code>, <code>--maximum</code>, <code>--median</code>, <code>--full</code>) и <code>samba-tool visualize uptodateness</code> — «visualizes replication lag as a heat-map matrix based on the DRS uptodateness vectors. This will show you if (but not why) changes are failing to replicate to some DCs» (release notes 4.9.0). Подкоманда <code>drs uptodateness</code> присутствует в исходнике начиная с 4.10.0 (в теге 4.9.0 её ещё нет), <code>--json</code> у неё есть уже в 4.10.0.</li>
+</ul>
+<h3>Консистентность базы: samba-tool dbcheck --cross-ncs</h3>
+<ul>
+<li><code>dbcheck</code> — «Check the local AD database for errors.» (man-страница). Проверка: <code># samba-tool dbcheck --cross-ncs</code>. Без <code>--cross-ncs</code> проверяется только основная партиция домена; с ней — все партиции (naming contexts).</li>
+<li>Запускать <strong>локально на каждом DC</strong>: «You must run the check and fix command on every Samba AD DC locally, because some fixes apply to non-replicated attributes and modifications are not replicated to other DCs. The tool cannot be run over LDAP.» (вики Dbcheck). Выполнять регулярно: «As database inconsistencies have the potential to accumulate over time, it is worth running dbcheck regularly.»</li>
+<li>Запуск без <code>--fix</code> только сообщает о проблемах и «is completely safe»; <code>--fix</code> правит базу. Команда исправления:</li>
+</ul>
+<pre><code># samba-tool dbcheck --cross-ncs --fix
+</code></pre>
+<ul>
+<li>С <code>--fix</code> вопросы задаются по каждой ошибке; ответ <code>all</code> исправляет все ошибки того же типа. Параметр <code>--yes</code> отвечает «да» автоматически. Ускорение заметное: «passing the --yes parameter to the command fixed 3500 objects in 10 seconds in our test environment. Without this parameter, the command required 4:50 minutes for the same operation»; причина — без <code>--yes</code> на каждый объект выполняется три вызова <code>fsync()</code>.</li>
+<li>Формулировка из <code>--help</code> в исходнике 4.25.0: «don't confirm changes individually. Applies all as a single transaction (will not succeed if any errors are found)»; в 4.5–4.7 текст был «don't confirm changes, just do them all as a single transaction». По исходнику 4.25.0 единая транзакция открывается только при <strong><code>--fix --yes</code> вместе</strong> (<code>if yes and fix: samdb.transaction_start()</code>).</li>
+<li>После починки базу проверяют повторно. Перед <code>--fix</code> вики советует сделать резервную копию домена (лучше и online-, и offline-): «The dbcheck tool is modifying your database… There is a small risk that the act of fixing the problem could itself have a unforeseen and negative side-effects» (см. <a href="%D0%A0%D0%B5%D0%B7%D0%B5%D1%80%D0%B2%D0%BD%D0%BE%D0%B5-%D0%BA%D0%BE%D0%BF%D0%B8%D1%80%D0%BE%D0%B2%D0%B0%D0%BD%D0%B8%D0%B5-%D0%B8-%D0%B2%D0%BE%D1%81%D1%81%D1%82%D0%B0%D0%BD%D0%BE%D0%B2%D0%BB%D0%B5%D0%BD%D0%B8%D0%B5-AD-DC.html">Резервное копирование и восстановление AD DC</a>).</li>
+<li>Если починка навредила, вики предлагает по порядку: <code>samba-tool drs replicate --full-sync --sync-forced</code> по всем партициям; переподключить DC (join заново, база пересобирается); в крайнем случае восстановить домен из backup-файла (потребует заново присоединить все DC).</li>
+</ul>
+<h3>Сравнение двух DC: samba-tool ldapcmp</h3>
+<ul>
+<li>Вики: подкоманда сравнивает LDAP-базы двух DC независимо от того, Samba это или Windows.</li>
+<li>Ограничения: сравнение идёт <strong>по LDAP</strong>, сервер должен быть доступен на порту 389; сравниваются только объекты, возвращаемые wildcard-поиском (скрытые атрибуты не обрабатываются); часть атрибутов игнорируется явно — «non replicating attributes… always have different values on the corresponding objects in separate DCs».</li>
+<li>Примеры из вики:</li>
+</ul>
+<pre><code># samba-tool ldapcmp ldap://DC1 ldap://DC2 -Uadministrator
+# samba-tool ldapcmp ldap://DC1 ldap://DC2 -Uadministrator domain
+# samba-tool ldapcmp ldap://DC1 ldap://DC2 -Uadministrator configuration
+# samba-tool ldapcmp ldap://DC1 ldap://DC2 -Uadministrator schema
+# samba-tool ldapcmp ldap://DC1 ldap://DC2 -Uadministrator dnsdomain
+# samba-tool ldapcmp ldap://DC1 ldap://DC2 -Uadministrator dnsforest
+</code></pre>
+<ul>
+<li>Даже на исправной репликации сравнение контекста <code>domain</code> падает на нереплицируемых атрибутах <code>msDS-NcType</code> и <code>serverState</code>, а в <code>configuration</code> добавляется <code>subrefs</code>; их исключают фильтром:</li>
+</ul>
+<pre><code># samba-tool ldapcmp ldap://DC1 ldap://DC2 -Uadministrator domain --filter=msDS-NcType,serverState
+# samba-tool ldapcmp ldap://DC1 ldap://DC2 -Uadministrator --filter=msDS-NcType,serverState,subrefs
+</code></pre>
+<ul>
+<li>Исходник 4.25.0, дополнительные опции: <code>-w/--two</code> (домены разные), <code>-q/--quiet</code> — «Do not print anything but relay on just exit code», <code>-v/--verbose</code>, <code>--sd</code> (сравнивать только <code>nTSecurityDescriptor</code>), <code>--sort-aces</code>, <code>--view section|collision</code>, <code>--base</code>/<code>--base2</code>, <code>--scope SUB|ONE|BASE</code>, <code>--filter</code> («List of comma separated attributes to ignore in the comparison»), <code>--skip-missing-dn</code>.</li>
+<li>При расхождениях команда поднимает <code>CommandError(&quot;Compare failed: %d&quot; % status)</code> — то есть завершается с ненулевым кодом; в связке с <code>--quiet</code> это готовый чек для мониторинга.</li>
+</ul>
+<h3>ACL SysVol: samba-tool ntacl sysvolcheck</h3>
+<ul>
+<li>man-страница: <code>ntacl sysvolcheck</code> — «Check sysvol ACLs match defaults (including correct ACLs on GPOs).»; парная команда <code>ntacl sysvolreset</code> — «Reset sysvol ACLs to defaults (including correct ACLs on GPOs).»</li>
+<li>Исходник 4.25.0: <code>sysvolcheck</code> берёт из <code>smb.conf</code> пути <code>netlogon</code> и <code>sysvol</code>, извлекает <code>domain_sid</code> и вызывает <code>provision.checksysvolacl(...)</code> — то есть проверяются ACL всего дерева SysVol, включая GPO.</li>
+<li>Команда локальная (работает с ACL файловой системы конкретного DC), поэтому её имеет смысл запускать на каждом DC.</li>
+<li>На присоединённом DC: сначала синхронизировать SysVol, затем <code># samba-tool ntacl sysvolreset</code>; «If there are more than the default GPOs in Sysvol on the other DC(s), you must sync Sysvol to the new DC, samba-tool ntacl sysvolreset will throw an error if you do not» (вики Joining a Samba DC…). См. <a href="%D0%A0%D0%B5%D0%BF%D0%BB%D0%B8%D0%BA%D0%B0%D1%86%D0%B8%D1%8F-SysVol.html">Репликация SysVol</a>.</li>
+</ul>
+<h3>Неинтерактивный samba-tool: PASSWD, PASSWD_FD, PASSWD_FILE</h3>
+<p>man-страница <code>samba-tool(8)</code> 4.25.0, общий блок про <code>--password</code>:</p>
+<blockquote>
+<p>Specify the password on the commandline. […] If --password is not specified, the tool will check the PASSWD environment variable, followed by PASSWD_FD which is expected to contain an open file descriptor (FD) number. Finally it will check PASSWD_FILE (containing a file path to be opened). The file should only contain the password. Make certain that the permissions on the file restrict access from unwanted users!</p>
+</blockquote>
+<p>Там же о безопасности: не включать пароли в скрипты и не передавать значения пользователей в командную строку; лучше дать инструменту запросить пароль или получить билет через <code>kinit</code>; «While Samba will attempt to scrub the password from the process title (as seen in ps), this is after startup and so is subject to a race.»</p>
+<ul>
+<li>Порядок поиска подтверждается реализацией в исходниках Samba: <code>auth/credentials/credentials.c</code> последовательно вызывает <code>getenv(&quot;PASSWD&quot;)</code>, <code>getenv(&quot;PASSWD_FD&quot;)</code> (номер FD, <code>atoi</code>) и <code>getenv(&quot;PASSWD_FILE&quot;)</code> (путь к файлу). Этот код общий для инструментов Samba, поэтому переменные работают и для <code>samba-tool</code>.</li>
+<li>Альтернативы из той же man-страницы: <code>-U|--user=[DOMAIN\]USERNAME[%PASSWORD]</code> — при отсутствии <code>%PASSWORD</code> клиент сначала смотрит <code>USER</code> (там пароль допустим через <code>%</code>), затем <code>LOGNAME</code> (пароль не допускается), затем может взять имя из кэша билетов Kerberos; отдельно есть файл учётных данных (<code>-A</code>).</li>
+<li>В тестах самой Samba встречается форма с дескриптором: <code>out=$(PASSWD_FD=0 eval $cmd)</code> (<code>testprogs/blackbox/test_net_offline.sh</code>).</li>
+</ul>
+<h3>Автоматизация на Ansible: community-коллекция jomrr.samba</h3>
+<p>Коллекция <code>jomrr.samba</code> (автор Jonas Mauer, GPL-3.0-or-later, репозиторий на GitHub) управляет доменом Samba AD <strong>через нативные Python-биндинги</strong> (<code>samba.samdb.SamDB</code>, <code>samba.join</code>, <code>samba.net_s3</code>, <code>samba.dcerpc</code>), а не через подпроцессы <code>samba-tool</code>. «Every module is idempotent and supports check mode: the object modules diff the current against the desired state, while the lifecycle modules use a binary &quot;is it already provisioned/joined?&quot; check. A second run with the same parameters reports <code>changed: false</code>.»</p>
+<p>Требования (README и <code>meta/runtime.yml</code> артефакта 2.4.0):</p>
+<ul>
+<li><code>python3-samba</code> на исполняющем хосте (модули импортируют <code>samba.samdb.SamDB</code>; без биндингов падают с <code>missing_required_lib</code>);</li>
+<li><code>ansible-core &gt;= 2.19.0</code>;</li>
+<li>Kerberos/GSSAPI: рабочее разрешение DNS/SRV до DC, подходящий <code>krb5.conf</code>, синхронные часы;</li>
+<li>атрибуты RFC2307/POSIX (<code>uid_number</code>, <code>gid_number</code>, <code>unix_home_directory</code>, <code>login_shell</code>, <code>gecos</code> и др.) требуют домена, развёрнутого с <code>--use-rfc2307</code>.</li>
+</ul>
+<p>Модули (README коллекции; для 2.4.0 в артефакте — 20 файлов модулей):</p>
+<table>
+<thead>
+<tr>
+<th>Модуль</th>
+<th>Назначение</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>samba_provision</code></td>
+<td>развернуть новый DC (запускается локально на будущем DC; check mode только сообщает <code>changed</code>, сам провижн в нём не выполняется)</td>
+</tr>
+<tr>
+<td><code>samba_join_dc</code></td>
+<td>присоединить хост к домену как дополнительный DC (<code>samba.join</code>, полная репликация; запуск локально на присоединяемом хосте)</td>
+</tr>
+<tr>
+<td><code>samba_join_member</code>, <code>samba_join_sssd</code></td>
+<td>член домена через winbind (<code>samba.net_s3</code>, <code>secrets.tdb</code>) и через <code>adcli</code> (keytab); <code>samba_join_sssd</code> объявлен устаревшим с удалением в 3.0.0</td>
+</tr>
+<tr>
+<td><code>samba_user</code>, <code>samba_group</code>, <code>samba_ou</code>, <code>samba_computer</code> (+ <code>*_info</code>)</td>
+<td>объекты каталога; идемпотентны, check mode, diff</td>
+</tr>
+<tr>
+<td><code>samba_dns_record</code>, <code>samba_dns_zone</code> (+ <code>*_info</code>)</td>
+<td>DNS-записи и AD-интегрированные зоны Samba Internal DNS</td>
+</tr>
+<tr>
+<td><code>samba_password_policy</code>, <code>samba_password_settings</code></td>
+<td>политика паролей домена и объекты тонких политик (PSO)</td>
+</tr>
+<tr>
+<td><code>samba_schema_extension</code>, <code>samba_ntacl</code></td>
+<td>расширение схемы (LAPS, OpenSSH, LDAP compat) и NT ACL корней шар</td>
+</tr>
+</tbody>
+</table>
+<p>Подключение объектных модулей: LDAP с SASL/GSSAPI, принудительно <code>client ldap sasl wrapping = seal</code> (шифрование), порт 389, без LDAPS/StartTLS; билет Kerberos держится в памяти процесса; учётные данные задаются явно (<code>server</code>, <code>bind_username</code>, <code>bind_password</code>, <code>realm</code>) и один раз выносятся в <code>module_defaults</code> через группу действий <code>jomrr.samba.all</code>. Объектные модули предпочтительно запускать на самом DC (loopback); вариант с контроллера требует <code>python3-samba</code> на контроллере и открытого RPC endpoint mapper для управления DNS-зонами.</p>
+<p>Пример провижна (дословно из README):</p>
+<pre><code class="language-yaml">- name: Provision a new Samba AD domain controller
+  hosts: dc1.example.com           # runs locally on the host becoming the DC
+  tasks:
+    - name: Ensure the domain is provisioned
+      jomrr.samba.samba_provision:
+        realm: EXAMPLE.COM
+        domain: EXAMPLE
+        admin_password: &quot;{{ vault_dc_admin_password }}&quot;   # from Ansible Vault
+        dns_backend: SAMBA_INTERNAL
+        use_rfc2307: true
+        state: present
+</code></pre>
+<p>На Ansible Galaxy высшая версия коллекции — 2.4.0: в <code>MANIFEST.json</code> артефакта указаны репозиторий <code>https://github.com/jomrr/ansible-collection-samba</code> и <code>requires_ansible: &quot;&gt;=2.19.0&quot;</code> (поле <code>license</code> пустое, есть <code>license_file: LICENSE</code>); лицензия по README и файлу LICENSE — GNU GPL v3.0 или новее.</p>
+<h3>Автоматизация объектов AD: community.general.ldap_entry / ldap_attrs / ldap_passwd</h3>
+<ul>
+<li><code>ldap_entry</code> — «Add or remove LDAP entries. This module only asserts the existence or non-existence of an LDAP entry, not its attributes. To assert the attribute values of an entry, see community.general.ldap_attrs.» Требует <code>python-ldap</code>; поддержка check mode — full, diff mode — none.</li>
+<li><code>ldap_attrs</code> — «Add or remove multiple LDAP attribute values»; <code>state=present</code> добавляет недостающие значения, <code>absent</code> удаляет указанные, <code>exact</code> приводит набор значений ровно к заданному.</li>
+<li><code>ldap_passwd</code> — «Set a password for an LDAP entry. This module only asserts that a given password is valid for a given entry.»; параметры <code>dn</code>, <code>passwd</code>, <code>bind_dn</code>, <code>bind_pw</code>.</li>
+<li>По умолчанию модули пытаются SASL-бинд EXTERNAL через UNIX-сокет; для явного простого бина задаются <code>bind_dn</code>/<code>bind_pw</code>.</li>
+</ul>
+<p>Пример из документации <code>ldap_entry</code>:</p>
+<pre><code class="language-yaml">- name: Make sure we have a parent entry for users
+  community.general.ldap_entry:
+    dn: ou=users,dc=example,dc=com
+    objectClass: organizationalUnit
+</code></pre>
+<h3>Официальной коллекции Samba Team не существует</h3>
+<ul>
+<li>В Ansible Galaxy <strong>нет пространства имён</strong> <code>samba</code> (API v3 отдаёт HTTP 404; запрос <code>/api/v3/namespaces/?name=samba</code> — 0 записей; также отсутствуют <code>samba-team</code> и <code>sambateam</code>). Коллекция вида <code>samba.*</code> от команды Samba не публиковалась — искать её не нужно.</li>
+<li>Все коллекции с именем «samba» (поиск API <code>.../collection-versions/?name=samba</code>) — community-проекты:
+<ul>
+<li><code>jomrr.samba</code> — Samba <strong>AD DC</strong> (провижн, join, объекты, DNS, политики) — то, что нужно для AD DC;</li>
+<li><code>vladgh.samba</code> — только <strong>файловый сервер</strong>: «An Ansible collection for setting up Samba as a file server» (README 3.5.9), задачи — установка пакетов, каталоги шар, пользователи, доступ; «The following are not considered concerns of this collection… Managing firewall settings. Creating system users.»;</li>
+<li><code>eliminyro.samba</code> (1.0.1) — также файловый сервер/клиент: роли <code>config</code> (шары, пользователи, безопасность) и <code>mount</code> (монтирование CIFS на клиентах);</li>
+<li><code>vmutti.samba</code> (1.0.2) — не роль: <code>install.sh</code> + восстановление архива конфигов и <code>users.backup.tdb</code>.</li>
+</ul>
+</li>
+<li>Поиск Galaxy по ключевому слову «samba» (<code>keywords=samba</code>) возвращает 176 версий коллекций, среди которых много совпадений по содержимому (например, <code>jcook3701.pkgs</code> с playbook <code>samba.yml</code>) — на такие совпадения ориентироваться не стоит.</li>
+</ul>
+<h2>Подводные камни</h2>
+<ul>
+<li><code>dbcheck</code> предназначен для локального запуска на каждом DC: часть исправлений касается неповторяемых атрибутов, они не реплицируются. Man-страница при этом описывает <code>-H/--URL</code> («LDB URL for database or target server»), а исходник умеет подключаться по <code>ldap://</code>, но рабочее правило из вики — запускать на самом DC.</li>
+<li><code>--yes</code> без <code>--fix</code> ничего не исправляет; единая транзакция (и связанное с ней ускорение) включается только при <code>--fix --yes</code> (исходник 4.25.0). Если ошибки найдены, в этом режиме не применяется ничего — это ожидаемое поведение, а не сбой.</li>
+<li><code>--fix</code> модифицирует базу и может дать неожиданные побочные эффекты; полностью безопасен только прогон без <code>--fix</code>. Перед починкой — резервная копия домена (лучше online + offline), после починки — повторная проверка.</li>
+<li><code>Warning: No NC replicated for Connection!</code> в выводе <code>showrepl</code> — не обязательно поломка: вики отсылает за объяснением к FAQ. Отсутствие соседей сразу после join тоже нормально — до 15 минут на построение связей KCC.</li>
+<li>В JSON <code>drs showrepl</code> нет ключей <code>site</code>/<code>server</code> (удаляются при выводе), а связи с <code>is deleted</code> нужно отбрасывать — «summary» считает проблемными только живые связи, иначе скрипт увидит ложные ошибки.</li>
+<li><code>ldapcmp</code> всегда найдёт различия в нереплицируемых атрибутах (<code>msDS-NcType</code>, <code>serverState</code>, <code>subrefs</code>) — без <code>--filter</code> сравнение не имеет смысла как регулярная проверка; для машинного использования есть <code>-q</code> и ненулевой код возврата.</li>
+<li><code>ntacl sysvolcheck</code>/<code>sysvolreset</code> работают с ACL локальной файловой системы и путями <code>sysvol</code>/<code>netlogon</code> из <code>smb.conf</code>; на новом DC без синхронизированного SysVol (нестандартные GPO) <code>sysvolreset</code> завершится ошибкой.</li>
+<li>Модули <code>community.general.ldap_*</code> используют <code>python-ldap</code> и по умолчанию пробуют SASL EXTERNAL через UNIX-сокет. В Samba по умолчанию действует <code>ldap server require strong auth = yes</code>: «Unencrypted connections only allow sasl binds with sign or seal» — простой бинд по незашифрованному 389 будет отвергнут, поэтому для объектов AD нужен LDAPS/StartTLS (см. <a href="LDAPS-%D0%A1%D0%B5%D1%80%D1%82%D0%B8%D1%84%D0%B8%D0%BA%D0%B0%D1%82%D1%8B-AD-DC.html">LDAPS Сертификаты AD DC</a>).</li>
+<li><code>jomrr.samba</code> требует <code>python3-samba</code> на исполняющем хосте и <code>ansible-core &gt;= 2.19.0</code> — на старых ansible-core коллекция не заработает; <code>samba_join_sssd</code> объявлен устаревшим (удаление в 3.0.0). Это community-коллекция, не официальная; версия, проверенная для этой заметки, — 2.4.0.</li>
+<li>Опции <code>--json</code> и <code>--summary</code> у <code>drs showrepl</code> появились только в Samba 4.9.0: на 4.7/4.8 их нет (проверено по исходнику и release notes). Для мониторинга лагов репликации нужен ещё более новый Samba: подкоманда <code>drs uptodateness</code> есть в исходнике с 4.10.0 (в 4.9.0 — только <code>visualize uptodateness</code>).</li>
+<li>Переменные <code>PASSWD</code>/<code>PASSWD_FD</code>/<code>PASSWD_FILE</code> — не нововведение 4.25.0: реализация в <code>auth/credentials/credentials.c</code> присутствует уже в теге 4.0.0, а блок man-страницы с их описанием (<code>docs-xml/build/DTD/samba.entities</code>) появляется начиная с 4.15.0 (в 4.14.0 этих строк ещё нет).</li>
+</ul>
+<h2>Источники</h2>
+<ul>
+<li>https://www.samba.org/samba/docs/current/man-html/samba-tool.8.html — man-страница <code>samba-tool(8)</code>; по её колонтитулу — версия 4.25.0 («This man page is complete for version 4.25.0 of the Samba suite»). Отсюда: описание <code>drs showrepl</code> с <code>--json</code>/<code>--summary</code>, <code>dbcheck</code>, <code>ldapcmp</code> (синтаксис), <code>ntacl sysvolcheck</code>/<code>sysvolreset</code>, <code>drs uptodateness</code> (список опций), <code>visualize</code>, блок <code>--password</code> с PASSWD/PASSWD_FD/PASSWD_FILE и <code>-U/--user</code> с USER/LOGNAME.</li>
+<li>https://wiki.samba.org/index.php/Dbcheck — обязательный локальный запуск на каждом DC, <code>--cross-ncs</code>, <code>--fix</code>, <code>--yes</code> (3500 объектов: 10 с против 4:50), список проверок, «worth running dbcheck regularly», precautions и порядок восстановления после неудачной починки.</li>
+<li>https://wiki.samba.org/index.php/Samba-tool_ldapcmp — команды сравнения целиком и по партициям, ограничения (LDAP/389, wildcard, нереплицируемые атрибуты), примеры <code>--filter=msDS-NcType,serverState,subrefs</code>.</li>
+<li>https://wiki.samba.org/index.php/Verifying_the_Directory_Replication_Statuses — назначение и формат вывода <code>samba-tool drs showrepl</code> (INBOUND/OUTBOUND NEIGHBORS, KCC CONNECTION OBJECTS), до 15 минут на создание связей KCC, список реплицируемых контейнеров, <code>repadmin /showrepl</code> на Windows DC.</li>
+<li>https://wiki.samba.org/index.php/Joining_a_Samba_DC_to_an_Existing_Active_Directory — <code>samba-tool ntacl sysvolreset</code> после синхронизации SysVol, предупреждение про ошибку при нестандартных GPO, проверка репликации через <code>samba-tool drs showrepl</code>.</li>
+<li>https://www.samba.org/samba/history/samba-4.9.0.html — release notes 4.9.0: новые опции <code>--summary</code>/<code>--json</code> у <code>drs showrepl</code> («intended for human and machine audiences, respectively») и <code>visualize uptodateness</code>.</li>
+<li>https://github.com/jomrr/ansible-collection-samba — README коллекции <code>jomrr.samba</code>: назначение, список модулей, требования (<code>python3-samba</code>, <code>ansible-core &gt;= 2.19.0</code>, Kerberos, RFC2307), идемпотентность и check mode, топология запуска, примеры playbook и предупреждение об устаревании <code>samba_join_sssd</code>.</li>
+<li>https://galaxy.ansible.com/api/v3/plugin/ansible/content/published/collections/artifacts/jomrr-samba-2.4.0.tar.gz — артефакт <code>jomrr.samba</code> 2.4.0: <code>MANIFEST.json</code> (версия, автор, GPL-3.0-or-later, репозиторий), <code>meta/runtime.yml</code> (<code>requires_ansible: &quot;&gt;=2.19.0&quot;</code>, группа действий <code>jomrr.samba.all</code>, deprecation <code>samba_join_sssd</code>), документация модулей (<code>samba_provision</code>, <code>samba_password_policy</code>, <code>samba_dns_record</code>, <code>samba_user</code>).</li>
+<li>https://galaxy.ansible.com/api/v3/plugin/ansible/search/collection-versions/?name=samba — поиск Galaxy по имени: коллекции <code>jomrr.samba</code>, <code>vladgh.samba</code>, <code>eliminyro.samba</code>, <code>vmutti.samba</code>; <code>https://galaxy.ansible.com/api/v3/namespaces/samba/</code> — 404 (пространства имён <code>samba</code> нет).</li>
+<li>https://galaxy.ansible.com/api/v3/plugin/ansible/content/published/collections/artifacts/vladgh-samba-3.5.9.tar.gz — README <code>vladgh.samba</code> 3.5.9: «An Ansible collection for setting up Samba as a file server» и список не-задач коллекции.</li>
+<li>https://galaxy.ansible.com/api/v3/plugin/ansible/content/published/collections/artifacts/eliminyro-samba-1.0.1.tar.gz и https://galaxy.ansible.com/api/v3/plugin/ansible/content/published/collections/artifacts/vmutti-samba-1.0.2.tar.gz — README остальных одноимённых коллекций: роли <code>config</code>/<code>mount</code> (файловый сервер и клиент CIFS) и установочный <code>install.sh</code> соответственно.</li>
+<li>https://docs.ansible.com/ansible/latest/collections/community/general/ldap_entry_module.html, https://docs.ansible.com/ansible/latest/collections/community/general/ldap_attrs_module.html, https://docs.ansible.com/ansible/latest/collections/community/general/ldap_passwd_module.html — документация модулей <code>community.general</code>: назначение, требование <code>python-ldap</code>, <code>check_mode</code>/<code>diff_mode</code>, параметры <code>dn</code>, <code>attributes</code>, <code>state</code>, <code>passwd</code>, <code>bind_dn</code>/<code>bind_pw</code>, примеры.</li>
+<li>https://www.samba.org/samba/docs/current/man-html/smb.conf.5.html — man-страница <code>smb.conf(5)</code> 4.25.0: <code>ldap server require strong auth</code> (значение по умолчанию <code>yes</code>, «Unencrypted connections only allow sasl binds with sign or seal»).</li>
+<li>https://git.samba.org/?p=samba.git;a=search;h=master;st=grep;s=PASSWD_FD — поиск по исходникам Samba: реализация в <code>auth/credentials/credentials.c</code> (<code>getenv(&quot;PASSWD&quot;)</code>, <code>getenv(&quot;PASSWD_FD&quot;)</code>, <code>getenv(&quot;PASSWD_FILE&quot;)</code>) и пример <code>PASSWD_FD=0</code> в <code>testprogs/blackbox/test_net_offline.sh</code>.</li>
+<li>https://raw.githubusercontent.com/samba-team/samba/samba-4.25.0/python/samba/netcmd/drs.py — исходник <code>drs showrepl</code> 4.25.0: полный набор опций, критерии failing-связей и <code>return 1</code>, структура JSON (<code>dsa</code>, <code>repsFrom</code>, <code>repsTo</code>, <code>NTDSConnections</code>; удаление <code>site</code>/<code>server</code>), определение <code>cmd_drs_uptodateness</code>; сверка с тегами 4.7.0, 4.8.0, 4.9.0, 4.10.0.</li>
+<li>https://raw.githubusercontent.com/samba-team/samba/samba-4.25.0/python/samba/netcmd/dbcheck.py — исходник <code>dbcheck</code> 4.25.0: тексты <code>--help</code> для <code>--fix</code>, <code>--yes</code>, <code>--cross-ncs</code>, <code>--attrs</code>, <code>--quick-membership-checks</code>, <code>-H/--URL</code>; транзакция только при <code>if yes and fix</code>.</li>
+<li>https://raw.githubusercontent.com/samba-team/samba/samba-4.25.0/python/samba/netcmd/ntacl.py — исходник <code>ntacl</code> 4.25.0: <code>sysvolcheck</code> читает пути <code>sysvol</code>/<code>netlogon</code> и вызывает <code>provision.checksysvolacl</code>.</li>
+<li>https://raw.githubusercontent.com/samba-team/samba/samba-4.25.0/python/samba/netcmd/ldapcmp.py — исходник <code>ldapcmp</code> 4.25.0: опции <code>-q/--quiet</code>, <code>--filter</code>, <code>--skip-missing-dn</code>, <code>--sd</code>, <code>--sort-aces</code>, <code>--view</code>, <code>--base/--base2</code>, <code>--scope</code>; <code>CommandError(&quot;Compare failed: …&quot;)</code> при расхождениях.</li>
+<li>https://raw.githubusercontent.com/samba-team/samba/samba-4.25.0/python/samba/netcmd/main.py и https://raw.githubusercontent.com/samba-team/samba/samba-4.25.0/source4/scripting/bin/samba-tool — точка входа: <code>samba_tool()</code> возвращает код команды, скрипт делает <code>sys.exit(retval)</code> (код возврата <code>--summary</code> виден из cron/мониторинга).</li>
+<li>https://raw.githubusercontent.com/samba-team/samba/samba-4.7.0/python/samba/netcmd/drs.py (и одноимённые файлы тегов samba-4.8.0, samba-4.9.0, samba-4.10.0) — проверка версий появления <code>--json</code>/<code>--summary</code> у <code>drs showrepl</code> (4.9.0) и подкоманды <code>drs uptodateness</code> (4.10.0).</li>
+<li>https://raw.githubusercontent.com/samba-team/samba/samba-4.25.0/auth/credentials/credentials.c — реализация порядка PASSWD → PASSWD_FD → PASSWD_FILE.</li>
+<li>https://raw.githubusercontent.com/samba-team/samba/samba-4.25.0/docs-xml/build/DTD/samba.entities (и файлы того же пути в тегах samba-4.0.0…samba-4.15.0) — блок man-страницы про <code>--password</code> и переменные; проверка, что описание появилось в 4.15.0 (в 4.14.0 его нет), а реализация существует с 4.0.0.</li>
+<li>https://raw.githubusercontent.com/samba-team/samba/samba-4.25.0/docs-xml/manpages/samba-tool.8.xml — исходный XML man-страницы 4.25.0: формулировка про <code>drs showrepl</code> с <code>--json</code>/<code>--summary</code> (совпадает с отрендеренной man-страницей).</li>
+</ul>
+<h2>Связанные заметки</h2>
+<ul>
+<li><a href="%D0%94%D0%B8%D0%B0%D0%B3%D0%BD%D0%BE%D1%81%D1%82%D0%B8%D0%BA%D0%B0-AD-DC.html">Диагностика AD DC</a></li>
+<li><a href="%D0%A0%D0%B5%D0%BF%D0%BB%D0%B8%D0%BA%D0%B0%D1%86%D0%B8%D1%8F-SysVol.html">Репликация SysVol</a></li>
+<li><a href="%D0%A0%D0%B5%D0%B7%D0%B5%D1%80%D0%B2%D0%BD%D0%BE%D0%B5-%D0%BA%D0%BE%D0%BF%D0%B8%D1%80%D0%BE%D0%B2%D0%B0%D0%BD%D0%B8%D0%B5-%D0%B8-%D0%B2%D0%BE%D1%81%D1%81%D1%82%D0%B0%D0%BD%D0%BE%D0%B2%D0%BB%D0%B5%D0%BD%D0%B8%D0%B5-AD-DC.html">Резервное копирование и восстановление AD DC</a></li>
+<li><a href="LDAPS-%D0%A1%D0%B5%D1%80%D1%82%D0%B8%D1%84%D0%B8%D0%BA%D0%B0%D1%82%D1%8B-AD-DC.html">LDAPS Сертификаты AD DC</a></li>
+<li><a href="%D0%A3%D0%BF%D1%80%D0%B0%D0%B2%D0%BB%D0%B5%D0%BD%D0%B8%D0%B5-%D1%81%D0%BB%D1%83%D0%B6%D0%B1%D0%BE%D0%B9-AD-DC.html">Управление службой AD DC</a></li>
+</ul>
+</main>
+</body>
+</html>

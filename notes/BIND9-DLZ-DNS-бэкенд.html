@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BIND9_DLZ DNS-бэкенд</title>
+<link rel="stylesheet" href="../style.css">
+</head>
+<body>
+<nav><a href="../index.html">База знаний Samba AD DC</a></nav>
+<main><h1>BIND9_DLZ DNS-бэкенд</h1>
+<h2>Суть</h2>
+<p>Страница описывает DNS-бэкенд <code>BIND9_DLZ</code>: плагин BIND9, который на запросы зон, зарегистрированных в Active Directory, читает базу Samba AD напрямую. Бэкенд рекомендуется для сложных DNS-конфигураций, которые внутренний DNS-сервер Samba не поддерживает (<a href="%D0%92%D0%BD%D1%83%D1%82%D1%80%D0%B5%D0%BD%D0%BD%D0%B8%D0%B9-DNS-%D0%B1%D1%8D%D0%BA%D0%B5%D0%BD%D0%B4.html">Внутренний DNS бэкенд</a> — ограничения: нет кэширования, рекурсии, передачи зон). Зоны хранятся и реплицируются в каталоге AD. Конфигурация модуля — <code>/usr/local/samba/bind-dns/named.conf</code> (до Samba 4.7 — <code>/usr/local/samba/private/named.conf</code>); файл создаётся при provision/join/upgrade с <code>--dns-backend=BIND9_DLZ</code> или при запуске <code>samba_upgradedns</code>.</p>
+<h2>Ключевое</h2>
+<h3>Требования к BIND</h3>
+<ul>
+<li>Поддерживаются только версии BIND, активно сопровождаемые ISC. Модули поставляются под версии: <code>dlz_bind9.so</code> — 9.8.x, <code>dlz_bind9_9.so</code> — 9.9.x, <code>dlz_bind9_10.so</code> — 9.10.x, <code>dlz_bind9_11.so</code> — 9.11.x, <code>dlz_bind9_12.so</code> — 9.12.x, <code>dlz_bind9_14.so</code> — 9.14.x, <code>dlz_bind9_16.so</code> — 9.16.x (файлы в <code>/usr/local/samba/lib/bind9/</code>).</li>
+<li>Версия BIND в системе: <code>named -v</code>. Модули 9.8/9.9 поддерживаются с Samba 4.0, 9.10 — с 4.2, 9.11 — с 4.5.2, 9.12/9.14/9.16 — с 4.12.10/4.13.2.</li>
+<li>BIND обязан работать на том же хосте, что и Samba AD DC, и не должен запускаться в chroot-окружении.</li>
+</ul>
+<h3>Настройка</h3>
+<ol>
+<li>
+<p>Подключить конфигурацию Samba в <code>named.conf</code> BIND:</p>
+<pre><code>include &quot;/usr/local/samba/bind-dns/named.conf&quot;;
+</code></pre>
+</li>
+<li>
+<p>В <code>/usr/local/samba/bind-dns/named.conf</code> раскомментировать модуль под свою версию BIND, например для 9.11:</p>
+<pre><code>database &quot;dlopen /usr/local/samba/lib/bind9/dlz_bind9_11.so&quot;;
+</code></pre>
+</li>
+<li>
+<p>В секцию <code>options {}</code> <code>named.conf</code> добавить (динамические обновления требуют BIND ≥ 9.8):</p>
+<pre><code>tkey-gssapi-keytab &quot;/usr/local/samba/private/dns.keytab&quot;;
+minimal-responses yes;
+</code></pre>
+</li>
+<li>
+<p>Проверить, что <code>/etc/krb5.conf</code> читаем пользователем BIND, и что есть утилита <code>nsupdate</code> (<code>which nsupdate</code>).</p>
+</li>
+<li>
+<p>Проверить конфигурацию <code>named-checkconf</code> и запустить BIND.</p>
+</li>
+<li>
+<p>Для BIND9_DLZ на Samba до 4.4.0 права на <code>dns.keytab</code> исправить: <code>chmod 640 /usr/local/samba/private/dns.keytab</code> и <code>chown root:named ...</code>; при обновлении с версий до 4.8.0 — права на каталог <code>bind-dns</code> (<code>chmod 770</code>, <code>chown root:named</code>).</p>
+</li>
+</ol>
+<p>Смена/перенастройка бэкенда (заодно пересоздаёт учётки <code>dns-*</code> в AD и чинит проблемы keytab):</p>
+<pre><code># samba_upgradedns --dns-backend=BIND9_DLZ
+</code></pre>
+<p>после чего перезапустить BIND.</p>
+<h3>Отладка и проверка</h3>
+<ul>
+<li>Логирование модуля: дописать к <code>database &quot;dlopen ...&quot;</code> аргумент <code>-d 3</code> и запустить <code>named -u named -f -g 2&gt;&amp;1 | tee /tmp/named.log</code>.</li>
+<li>Динамические обновления проверяются отдельной страницей «Testing Dynamic DNS Updates»; ошибки вида NOTAUTH видны в выводе <code>samba_dnsupdate --verbose</code>.</li>
+<li>Проверка жёстких ссылок баз DNS: inode файлов в <code>/usr/local/samba/private/sam.ldb.d/</code> и <code>/usr/local/samba/private/dns/sam.ldb.d/</code> должны совпадать (<code>ls -lai</code>).</li>
+</ul>
+<h2>Подводные камни</h2>
+<ul>
+<li><strong>Проблема блокировок (lockup):</strong> каждый вызов плагина сериализуется мьютексом, доступ к базе — fcntl-блокировкой; заблокированная база останавливает обработку любых запросов BIND, включая внешние (не-samba). Поэтому для высоконагруженных сред BIND9_DLZ не рекомендуется как основной DNS: лучше внешний сервер, форвардящий в узел только запросы зон AD. В небольших средах проблема маловероятна; увеличение worker-потоков (<code>-n</code>) не помогает.</li>
+<li><strong>BIND нельзя reload — только restart:</strong> на Samba AD DC <code>rndc reload</code>/reload логирует «Ignoring duplicate zone»; проверить logrotate и переопределить юнит (<code>systemctl edit bind9.service</code>, очистить/заменить <code>ExecReload</code>).</li>
+<li><strong>Порядок запуска служб:</strong> Samba должна стартовать после BIND — в override юнита <code>After=network.target network-online.target bind9.service</code>.</li>
+<li><strong>systemd-изоляция:</strong> при ошибке «Read-only file system» добавить <code>/var/lib/samba/bind-dns</code> в <code>ReadWritePaths=</code> юнита.</li>
+<li><strong>WINS-записи из Windows AD</strong> вызывают «unhandled record type 65281»: отключить WINS-resolving в DNS Windows DC, перезапустить Samba, повторить <code>samba_upgradedns --dns-backend=BIND9_DLZ</code>, перезапустить BIND.</li>
+<li><strong>Каталог bind-dns</strong> существует только при provision/join с <code>--dns-backend=BIND9_DLZ</code> или после <code>samba_upgradedns</code>.</li>
+<li><strong>Пакетные сборки</strong> могут ставить слишком строгие права на родительские каталоги <code>dns.keytab</code> — BIND не сможет его прочитать.</li>
+<li>Бэкенд выбирается при provision/join (<code>--dns-backend=BIND9_DLZ</code>); <code>BIND9_FLATFILE</code> не поддерживается и будет удалён (см. <a href="%D0%A3%D1%81%D1%82%D0%B0%D0%BD%D0%BE%D0%B2%D0%BA%D0%B0-Samba-AD-DC.html">Установка Samba AD DC</a>).</li>
+</ul>
+<h2>Связанные заметки</h2>
+<ul>
+<li><a href="%D0%A3%D1%81%D1%82%D0%B0%D0%BD%D0%BE%D0%B2%D0%BA%D0%B0-Samba-AD-DC.html">Установка Samba AD DC</a></li>
+<li><a href="%D0%9F%D1%80%D0%B8%D1%81%D0%BE%D0%B5%D0%B4%D0%B8%D0%BD%D0%B5%D0%BD%D0%B8%D0%B5-%D0%B2%D1%82%D0%BE%D1%80%D0%BE%D0%B3%D0%BE-DC-%D0%BA-%D0%B4%D0%BE%D0%BC%D0%B5%D0%BD%D1%83.html">Присоединение второго DC к домену</a></li>
+<li><a href="%D0%92%D0%BD%D1%83%D1%82%D1%80%D0%B5%D0%BD%D0%BD%D0%B8%D0%B9-DNS-%D0%B1%D1%8D%D0%BA%D0%B5%D0%BD%D0%B4.html">Внутренний DNS бэкенд</a></li>
+<li><a href="%D0%9F%D0%BE%D1%80%D1%82%D1%8B-AD-DC.html">Порты AD DC</a></li>
+<li><a href="%D0%94%D0%B8%D0%B0%D0%B3%D0%BD%D0%BE%D1%81%D1%82%D0%B8%D0%BA%D0%B0-AD-DC.html">Диагностика AD DC</a></li>
+</ul>
+</main>
+</body>
+</html>

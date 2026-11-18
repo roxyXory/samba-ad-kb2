@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Управляемые групповые сервисные учётные записи (gMSA) в Samba AD DC</title>
+<link rel="stylesheet" href="../style.css">
+</head>
+<body>
+<nav><a href="../index.html">База знаний Samba AD DC</a></nav>
+<main><h1>Управляемые групповые сервисные учётные записи (gMSA) в Samba AD DC</h1>
+<h2>Суть</h2>
+<p>gMSA (Group Managed Service Account) — сервисная учётная запись Active Directory, пароль которой не задаётся статически: контроллер домена вычисляет его из ключей KDS (Key Distribution Service) и автоматически ротирует, а служба на Unix-хосте получает текущий и предыдущий пароль либо билет Kerberos. Поддержка gMSA появилась в Samba 4.21, чем была завершена поддержка функционального уровня 2012 (FL 2012); в 4.20 были только клиентские команды чтения пароля. Samba даёт и управление учётными записями (<code>samba-tool service-account …</code>) с ключами KDS (<code>samba-tool domain kds root-key …</code>), и клиентское получение секретов (<code>samba-tool user getpassword</code>, <code>samba-tool user get-kerberos-ticket</code>). Настройка gMSA привычными Windows-инструментами (PowerShell через ADWS) Samba не поддерживает — только <code>samba-tool</code>.</p>
+<h2>Ключевое</h2>
+<h3>Назначение и хронология</h3>
+<ul>
+<li>Samba 4.21: «Samba 4.21 adds support for gMSAs (Group Managed Service Accounts), completing support for Functional Level 2012.»</li>
+<li>Зачем это нужно (дословно из release notes): «The purpose of a gMSA is to allow a single host, or a cluster of hosts, to share access to an automatically rotating password, avoiding the weak static service passwords that are often the entrypoint of attackers to AD domains. Each server has a strong and regularly rotated password, which is used to access the gMSA account of (e.g.) the database server.»</li>
+<li>«Samba provides management and client tools, allowing services on Unix hosts to access the current and next gMSA passwords, as well as obtain a credentials cache.»</li>
+<li>Samba 4.20 (клиентская часть): «reading the current and previous gMSA password via &quot;samba-tool user getpassword&quot;» и «writing a Kerberos Ticket Granting Ticket (TGT) to a local credentials cache with a new command &quot;samba-tool user get-kerberos-ticket&quot;». Тогда же команды чтения пароля научились работать с удалённым сервером: «permit operation against a remote server with authenticated access to &quot;-H ldap://$DCNAME&quot;».</li>
+<li>Samba 4.21 расширила существующие команды чтения пароля: они работают и с gMSA (с аутентификацией по LDAP, через <code>-H</code>), и локально для учётных записей с совместимым паролем (plaintext через GPG, совместимый хэш). Перечислены <code>samba-tool user getpassword</code>, <code>samba-tool user get-kerberos-ticket</code>, <code>samba-tool domain exportkeytab</code>.</li>
+</ul>
+<h3>Ограничения</h3>
+<ul>
+<li><strong>ADWS нет.</strong> «Windows tools for dealing with gMSAs tend to use Active Directory Web Services (ADWS) from Powershell for setting up the accounts, and this separate protocol is not supported by Samba 4.21.» Значит, создавать и настраивать gMSA в домене Samba можно только через <code>samba-tool</code>.</li>
+<li><strong>Kerberos вместо simple bind.</strong> «Kerberos is a better choice (gMSA accounts should not use LDAP simple binds, for reasons of both security and compatibility).»</li>
+<li><strong>Чтение пароля — от root или уполномоченного пользователя.</strong> В справке <code>samba-tool user getpassword</code>: «The command must be run from the root user id or another authorized user id.»</li>
+<li><strong><code>-H</code> для <code>getpassword</code> локальный по умолчанию, но для gMSA допускается удалённый DC.</strong> «The '-H' or '--URL' option normally only supports ldapi:// or [tdb://] and can be used to adjust the local path. By default, tdb:// is used. if the target account is a group managed service account, then in this case the -H can point to a remote AD DC LDAP server.»</li>
+<li><strong>Доступ к паролю определяется атрибутом <code>msDS-GroupMSAMembership</code></strong> (SDDL). Значение по умолчанию в модели gMSA — <code>O:BAD:(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;LA)</code> (константа <code>GROUP_MSA_MEMBERSHIP_DEFAULT</code>).</li>
+</ul>
+<h3>Управление учётными записями: <code>samba-tool service-account</code></h3>
+<p>Состав по man-странице <code>samba-tool(8)</code> (версия 4.25.0): <code>list</code>, <code>view</code>, <code>create</code>, <code>modify</code>, <code>delete</code> и <code>group-msa-membership</code> с подкомандами <code>show</code>, <code>add</code>, <code>remove</code>. У всех подкоманд есть <code>-H, --URL</code> — «LDB URL for database or target server».</p>
+<p>Опции:</p>
+<table>
+<thead>
+<tr>
+<th>Подкоманда</th>
+<th>Опции</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>service-account list</code></td>
+<td><code>--json</code> — «View service accounts as JSON instead of a list»</td>
+</tr>
+<tr>
+<td><code>service-account view</code></td>
+<td><code>--name</code> — «Account name of service account to view (required)»</td>
+</tr>
+<tr>
+<td><code>service-account create</code></td>
+<td><code>--name</code> (required), <code>--dns-host-name</code> (required), <code>--group-msa-membership</code> — «Optional Group MSA Membership SDDL», <code>--managed-password-interval</code> — «Managed password refresh interval in days»</td>
+</tr>
+<tr>
+<td><code>service-account modify</code></td>
+<td><code>--name</code>, <code>--dns-host-name</code>, <code>--group-msa-membership</code></td>
+</tr>
+<tr>
+<td><code>service-account delete</code></td>
+<td><code>--name</code></td>
+</tr>
+<tr>
+<td><code>group-msa-membership show</code></td>
+<td><code>--name</code>, <code>--json</code></td>
+</tr>
+<tr>
+<td><code>group-msa-membership add</code> / <code>remove</code></td>
+<td><code>--name</code>, <code>--principal</code> — «Name, DN or SID of principal to add» / «… to remove»</td>
+</tr>
+</tbody>
+</table>
+<p>Как эти вызовы выглядят на практике (из blackbox-тестов Samba 4.21.0, файл <code>python/samba/tests/samba_tool/service_account.py</code> и <code>group_msa_membership.py</code>):</p>
+<pre><code>samba-tool service-account create --name foo --dns-host-name example.com
+samba-tool service-account list
+samba-tool service-account view --name foo
+samba-tool service-account delete --name foo
+samba-tool service-account group-msa-membership show --name gmsa$ --json
+samba-tool service-account group-msa-membership add --name gmsa$ --principal alice
+</code></pre>
+<p>(имена <code>foo</code>, <code>example.com</code>, <code>gmsa$</code>, <code>alice</code> — из самих тестов; в тесте <code>group-msa-membership</code> передаётся готовое значение <code>account_name</code>, то есть с <code>$</code>.)</p>
+<p>Наблюдения из тестов:</p>
+<ul>
+<li><code>--name</code> принимается без завершающего <code>$</code>; созданная учётная запись получает sAMAccountName <code>foo$</code> (комментарий в тесте: «Since GroupManagedServiceAccount is also a Computer it ends in '$'»). Реализация <code>Computer.find</code> при отсутствии <code>$</code> в имени сама добавляет его для поиска по sAMAccountName.</li>
+<li><code>service-account list</code> выводит имена с <code>$</code> (<code>foo$</code>, <code>bar$</code>, <code>baz$</code>).</li>
+<li><code>service-account view</code> всегда печатает JSON; <code>msDS-ManagedPasswordInterval</code> по умолчанию равен 30.</li>
+<li><code>group-msa-membership show</code> в текстовом виде печатает <code>Account-DN: …</code> и DN допущенных принципалов, с <code>--json</code> — поля <code>dn</code> и <code>trustees</code>.</li>
+<li><code>group-msa-membership add</code> добавляет в <code>msDS-GroupMSAMembership</code> ACE с полным доступом (<code>SEC_ADS_GENERIC_ALL</code>) для указанного principal; если доступ уже есть, печатается «Trustee '…' is already allowed to show managed passwords for: …».</li>
+<li>Сообщения команд: «Created group managed service account: …», «Modified group managed service account: …», «Deleted group managed service account: …».</li>
+</ul>
+<h3>KDS root key — обязательная основа</h3>
+<ul>
+<li>«Group managed service accounts rotate passwords based on root keys, which can be managed using samba-tool, with commands such as» — в release notes приведены:</li>
+</ul>
+<pre><code>samba-tool domain kds root_key create
+samba-tool domain kds root_key list
+</code></pre>
+<p>Написание <code>root_key</code> — так в release notes; фактически подкоманда называется <code>root-key</code> (см. «Подводные камни»).</p>
+<ul>
+<li>«Samba will create a new root key for new domains at provision time, but users of gMSA accounts on upgraded domains will need to first create a root key.» То есть на домене, обновлённом до 4.21, ключ создаётся вручную.</li>
+<li>В исходниках 4.21.0 (<code>python/samba/provision/__init__.py</code>) при провижининге нового домена создаётся GKDI-ключ с комментарием «We want the GKDI key to be instantly available for use»: время начала использования берётся как <code>current_time - KEY_CYCLE_DURATION - MAX_CLOCK_SKEW</code> (то есть ключ сразу пригоден), в лог пишется «gkdi/gmsa root key added with guid …».</li>
+<li>Команды по man-странице (4.25.0):
+<ul>
+<li><code>domain kds root-key create [options]</code> — «Create KDS root keys»; опция <code>--use-start-time</code> («The key will be valid from this time», форматы: <code>&quot;now&quot;</code>, LDIF <code>YYYYmmddHHMMSS.0Z</code> или ISO 8601), <code>--json</code>;</li>
+<li><code>domain kds root-key list [options]</code> — «List KDS root keys. The newest keys are listed first.»; <code>-v</code>, <code>--show-secrets</code> («Print secret or potentially sensitive attributes, namely msKds-RootKeyData and msKds-SecretAgreementParam»), <code>--json</code>;</li>
+<li><code>domain kds root-key view [options]</code> — <code>--latest</code> («View the most recent root key») либо <code>--name=NAME</code> (GUID);</li>
+<li><code>domain kds root-key delete --name={GUID}</code> — «Use samba-tool domain kds root-key list to find the name of the key.»</li>
+</ul>
+</li>
+<li>В тестах Samba 4.21.0 ключи создаются и перечисляются так: <code>samba-tool domain kds root-key list --json</code>, <code>samba-tool domain kds root-key create -H ldap://… --json --use-start-time &lt;время&gt;</code>; после создания печатается <code>created root key &lt;GUID&gt;, usable from &lt;время&gt;</code>. Объекты ключей лежат в конфигурационном разделе, под <code>CN=Master Root Keys,CN=Group Key Distribution Service,CN=Services</code>.</li>
+</ul>
+<h3>Получение пароля и билета</h3>
+<p>Примеры дословно из release notes 4.21.0.</p>
+<p>NT-хэш (для NTLM) — «An example command, which gets the NT hash for use with NTLM, is»:</p>
+<pre><code>samba-tool user getpassword -H ldap://server --machine-pass \
+TestUser1 --attributes=unicodePwd
+</code></pre>
+<p>Билет Kerberos:</p>
+<pre><code>samba-tool user get-kerberos-ticket -H ldap://server --machine-pass \
+TestUser1 --output-krb5-ccache=/srv/service/krb5_ccache
+</code></pre>
+<p>Предыдущий NT-хэш — «gMSAs disclose a current and previous password. To access the previous NT hash, use:»</p>
+<pre><code>samba-tool user getpassword -H ldap://server --machine-pass TestUser1 \
+--attrs=unicodePwd;previous=1
+</code></pre>
+<p>Предыдущий пароль в UTF-8:</p>
+<pre><code>samba-tool user getpassword -H ldap://server --machine-pass TestUser1 \
+--attributes=pwdLastSet,virtualClearTextUTF8;previous=1
+</code></pre>
+<p>Пояснения к этим командам:</p>
+<ul>
+<li><code>-P, --machine-pass</code> — «Use stored machine account password» (опция Credentials Options, <code>python/samba/getopt.py</code>); во всех примерах release notes команды чтения пароля gMSA запускаются именно с ней.</li>
+<li><code>--attributes</code> — список атрибутов через запятую. <code>unicodePwd</code> содержит NT-хэш; виртуальный <code>virtualClearTextUTF16</code>/<code>virtualClearTextUTF8</code> — открытый текст: «When the account is a group managed service account, and the user is permitted to access msDS-ManagedPassword then the current and previous password can be read over LDAP. Add ;previous=1 to read the previous password.» Для <code>;previous</code> допустимо единственное значение: иначе выводится «Invalid attribute parameter ;previous=…, only supported value is previous=1».</li>
+<li><code>get-kerberos-ticket</code>: «The --output-krb5-ccache option should point to a location for the credentials cache. The default is a FILE: type cache if no prefix is specified.»</li>
+<li>Имя учётной записи в этих командах — sAMAccountName («The username specified on the command is the sAMAccountName»). У gMSA, созданных Samba, sAMAccountName заканчивается на <code>$</code>; в тестах <code>getpassword</code> вызывается с полным именем (<code>GMSA_Test_User$</code>), тогда как в примерах release notes имя приведено без <code>$</code>.</li>
+</ul>
+<h3>Детали реализации (Samba 4.21.0)</h3>
+<ul>
+<li>Объект gMSA имеет класс <code>msDS-GroupManagedServiceAccount</code>; модель — наследник <code>Computer</code> (<code>python/samba/domain/models/gmsa.py</code>), учётные записи создаются в well-known контейнере Managed Service Accounts (<code>DS_GUID_MANAGED_SERVICE_ACCOUNTS_CONTAINER</code>).</li>
+<li>Поля модели: <code>msDS-ManagedPasswordInterval</code> (по умолчанию 30), <code>dNSHostName</code>, <code>msDS-GroupMSAMembership</code> (по умолчанию <code>O:BAD:(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;LA)</code>), <code>msDS-ManagedPasswordId</code>, <code>msDS-ManagedPasswordPreviousId</code>.</li>
+<li>Список «trustees» строится из ACE, у которых есть право <code>SEC_ADS_READ_PROP</code> (и тип «allow»); в тесте доступ выдаётся SDDL вида <code>O:SYD:(A;;RP;;;S-1-5-21-…)</code>.</li>
+</ul>
+<h2>Подводные камни</h2>
+<ul>
+<li><strong><code>root_key</code> из release notes не сработает — подкоманда называется <code>root-key</code>.</strong> В исходниках 4.21.0 зарегистрирована только подкоманда <code>root-key</code> (<code>python/samba/netcmd/domain/kds/__init__.py</code>), а <code>SuperCommand</code> ищет имя подкоманды точным совпадением (<code>python/samba/netcmd/__init__.py</code>, <code>if a in self.subcommands</code>). Проверено запуском установленного <code>samba-tool</code> 4.22.11-Debian: <code>samba-tool domain kds root_key -h</code> отвечает «samba-tool domain kds: no such subcommand: root_key», а <code>samba-tool domain kds root-key -h</code> работает. Те же команды в тестах Samba и в man-страницах начиная с 4.23.0 записаны как <code>root-key</code>.</li>
+<li><strong><code>--attrs</code> из release notes не существует.</strong> В примере release notes для предыдущего NT-хэша стоит <code>--attrs=unicodePwd;previous=1</code>, но у команды объявлена только опция <code>--attributes</code> (исходник 4.21.0; в man-странице и в справке — <code>--attributes</code>). Проверено запуском <code>samba-tool</code> 4.22.11-Debian: <code>samba-tool user getpassword --attrs=unicodePwd TestUser1</code> → «error: no such option: --attrs», а с <code>--attributes</code> команда доходит до попытки открыть базу.</li>
+<li><strong><code>;previous=1</code> нужно брать в кавычки.</strong> В release notes аргумент приведён без кавычек (<code>--attrs=unicodePwd;previous=1</code>), но <code>;</code> — разделитель команд оболочки: без кавычек оболочка обрывает аргумент на <code>;</code> и пытается выполнить <code>previous=1</code> отдельной командой (проверено на <code>echo</code> в <code>bash</code>: без кавычек выводится только <code>--attributes=unicodePwd</code>, в кавычках — строка целиком). Правильно: <code>--attributes='unicodePwd;previous=1'</code>.</li>
+<li><strong>На обновлённых доменах KDS root key надо создать самому.</strong> <code>provision</code> создаёт ключ только для новых доменов; «users of gMSA accounts on upgraded domains will need to first create a root key» — без ключа пароли gMSA не будут вычисляться. Не забудьте про <code>samba-tool domain kds root-key create</code>.</li>
+<li><strong>ADWS/PowerShell не поддержан</strong> (Samba 4.21): настройка gMSA выполняется только через <code>samba-tool</code>; Windows-инструменты, работающие через ADWS, в домене Samba не помогут.</li>
+<li><strong>gMSA не должны использовать LDAP simple bind</strong> — только Kerberos (release notes); практический смысл — получать билет (<code>get-kerberos-ticket</code>) и работать через него.</li>
+<li><strong>Доступ к чтению пароля выдаётся отдельно.</strong> <code>msDS-GroupMSAMembership</code> по умолчанию — <code>O:BAD:(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;LA)</code>; чтобы конкретный хост/служба могли получать пароль, principal нужно добавить явно: <code>samba-tool service-account group-msa-membership add --name &lt;имя&gt; --principal &lt;sAMAccountName|DN&gt;</code>. Сама команда чтения пароля выполняется от root или уполномоченного пользователя, а <code>--machine-pass</code> использует пароль машинной учётной записи хоста.</li>
+<li><strong>Резервные копии.</strong> В Samba 4.23 <code>samba-tool domain backup --no-secrets</code> стал полностью удалять объекты класса <code>msKds-ProvRootKey</code> (раньше «it could still contain confidential attributes, including BitLocker recovery data and KDS root keys»). На более старых версиях бэкап, сделанный с <code>--no-secrets</code>, мог содержать KDS-ключи.</li>
+<li><strong>Man-страницы отстают от кода.</strong> В <code>samba-tool(8)</code> версий 4.21.5 и 4.22.0 команды <code>domain kds root-key</code> вообще не документированы (раздел появляется только в man-странице 4.23.0), хотя сами команды есть в 4.21.0. Команды <code>service-account</code> в man-странице 4.21.5 уже есть, а в 4.20.8 их нет — управление gMSA действительно новое в 4.21.</li>
+</ul>
+<h2>Источники</h2>
+<ul>
+<li>https://www.samba.org/samba/history/samba-4.21.0.html — главный: назначение gMSA, завершение FL 2012, ограничение по ADWS, примеры <code>getpassword</code>/<code>get-kerberos-ticket</code>, раздел про KDS root keys и создание ключа при provision.</li>
+<li>https://www.samba.org/samba/history/samba-4.20.0.html — клиентские команды 4.20 (<code>getpassword</code> по <code>-H ldap://</code>, новая <code>get-kerberos-ticket</code>).</li>
+<li>https://www.samba.org/samba/docs/current/man-html/samba-tool.8.html — man-страница <code>samba-tool</code> (для версии 4.25.0): полный состав подкоманд <code>service-account</code> и <code>domain kds root-key</code> с описаниями опций.</li>
+<li>https://lists.samba.org/archive/samba-announce/2024/000674.html — анонс Samba 4.21.0 в списке рассылки (тот же текст release notes).</li>
+<li>https://wiki.samba.org/index.php/Samba_4.21_Features_added/changed — вики-копия release notes 4.21 (подтверждает написание <code>root_key</code>).</li>
+<li>https://www.samba.org/samba/docs/4.21/man-html/samba-tool.8.html — man-страница 4.21.5: <code>service-account</code> документирован, раздела <code>kds</code> нет.</li>
+<li>https://www.samba.org/samba/docs/4.22/man-html/samba-tool.8.html — man-страница 4.22.0: раздела <code>kds</code> по-прежнему нет.</li>
+<li>https://www.samba.org/samba/docs/4.23/man-html/samba-tool.8.html — man-страница 4.23.0: <code>domain kds root-key</code> документирован.</li>
+<li>https://www.samba.org/samba/history/samba-4.23.0.html — <code>domain backup --no-secrets</code> и удаление объектов <code>msKds-ProvRootKey</code>.</li>
+<li>https://gitlab.com/samba-team/samba/-/raw/samba-4.21.0/python/samba/netcmd/domain/kds/<strong>init</strong>.py — регистрация подкоманды <code>&quot;root-key&quot;</code>.</li>
+<li>https://gitlab.com/samba-team/samba/-/raw/samba-4.21.0/python/samba/netcmd/<strong>init</strong>.py — <code>SuperCommand</code> ищет подкоманду точным совпадением имени.</li>
+<li>https://gitlab.com/samba-team/samba/-/raw/samba-4.21.0/python/samba/netcmd/service_account/service_account.py — реализация <code>service-account create/view/modify/delete/list</code> (обязательные <code>--name</code>, <code>--dns-host-name</code>).</li>
+<li>https://gitlab.com/samba-team/samba/-/raw/samba-4.21.0/python/samba/netcmd/service_account/group_msa_membership.py — <code>group-msa-membership show/add/remove</code>, выдача ACE через <code>add_trustee</code>.</li>
+<li>https://gitlab.com/samba-team/samba/-/raw/samba-4.21.0/python/samba/domain/models/gmsa.py — модель gMSA: интервал 30 дней, <code>msDS-GroupMSAMembership</code>, список trustees по <code>SEC_ADS_READ_PROP</code>.</li>
+<li>https://gitlab.com/samba-team/samba/-/raw/samba-4.21.0/python/samba/domain/models/constants.py — SDDL по умолчанию <code>GROUP_MSA_MEMBERSHIP_DEFAULT</code>.</li>
+<li>https://git.samba.org/?p=samba.git;a=blob_plain;f=python/samba/domain/models/computer.py;hb=samba-4.21.0 — добавление <code>$</code> к sAMAccountName и поиск по имени в <code>Computer.find</code>.</li>
+<li>https://gitlab.com/samba-team/samba/-/raw/samba-4.21.0/python/samba/provision/<strong>init</strong>.py — создание GKDI-ключа при провижининге нового домена и сообщение в логе.</li>
+<li>https://gitlab.com/samba-team/samba/-/raw/samba-4.21.0/python/samba/netcmd/user/readpasswords/getpassword.py — справка <code>getpassword</code>: root/authorized, <code>-H</code> для gMSA, <code>;previous=1</code>.</li>
+<li>https://gitlab.com/samba-team/samba/-/raw/samba-4.21.0/python/samba/netcmd/user/readpasswords/get_kerberos_ticket.py — справка <code>get-kerberos-ticket</code>, <code>--output-krb5-ccache</code>.</li>
+<li>https://gitlab.com/samba-team/samba/-/raw/samba-4.21.0/python/samba/netcmd/user/readpasswords/common.py — допустимо только <code>previous=1</code>.</li>
+<li>https://gitlab.com/samba-team/samba/-/raw/samba-4.21.0/python/samba/getopt.py — опция <code>-P, --machine-pass</code>.</li>
+<li>https://gitlab.com/samba-team/samba/-/raw/samba-4.21.0/python/samba/tests/samba_tool/service_account.py — тесты <code>service-account</code>: <code>--name foo</code> → <code>foo$</code>, интервал по умолчанию 30.</li>
+<li>https://gitlab.com/samba-team/samba/-/raw/samba-4.21.0/python/samba/tests/samba_tool/domain_kds_root_key.py — вызовы <code>domain kds root-key</code>, DN <code>CN=Master Root Keys,CN=Group Key Distribution Service,CN=Services</code>, вывод «created root key … usable from …».</li>
+<li>https://gitlab.com/samba-team/samba/-/raw/samba-4.21.0/python/samba/tests/samba_tool/user_getpassword_gmsa.py — SDDL доступа <code>O:SYD:(A;;RP;;;SID)</code> и вызовы <code>user getpassword</code> с sAMAccountName gMSA.</li>
+<li>Локальные проверки (запуск <code>samba-tool</code> 4.22.11-Debian из Debian 13): <code>samba-tool domain kds root_key -h</code> → «no such subcommand: root_key»; <code>samba-tool user getpassword --attrs=…</code> → «no such option: --attrs»; справки <code>samba-tool service-account create -h</code>, <code>samba-tool user get-kerberos-ticket -h</code>.</li>
+</ul>
+<h2>Связанные заметки</h2>
+<ul>
+<li><a href="%D0%A3%D1%81%D1%82%D0%B0%D0%BD%D0%BE%D0%B2%D0%BA%D0%B0-Samba-AD-DC.html">Установка Samba AD DC</a></li>
+<li><a href="Samba-%D0%BA%D0%B0%D0%BA-%D1%87%D0%BB%D0%B5%D0%BD-%D0%B4%D0%BE%D0%BC%D0%B5%D0%BD%D0%B0.html">Samba как член домена</a></li>
+<li><a href="%D0%9E%D0%B1%D0%BD%D0%BE%D0%B2%D0%BB%D0%B5%D0%BD%D0%B8%D0%B5-Samba.html">Обновление Samba</a></li>
+<li><a href="%D0%A5%D0%B0%D1%80%D0%B4%D0%B5%D0%BD%D0%B8%D0%BD%D0%B3-Samba-AD-DC.html">Харденинг Samba AD DC</a></li>
+<li><a href="%D0%A0%D0%B5%D0%B7%D0%B5%D1%80%D0%B2%D0%BD%D0%BE%D0%B5-%D0%BA%D0%BE%D0%BF%D0%B8%D1%80%D0%BE%D0%B2%D0%B0%D0%BD%D0%B8%D0%B5-%D0%B8-%D0%B2%D0%BE%D1%81%D1%81%D1%82%D0%B0%D0%BD%D0%BE%D0%B2%D0%BB%D0%B5%D0%BD%D0%B8%D0%B5-AD-DC.html">Резервное копирование и восстановление AD DC</a></li>
+</ul>
+</main>
+</body>
+</html>

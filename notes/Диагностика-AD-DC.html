@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Диагностика Samba AD DC</title>
+<link rel="stylesheet" href="../style.css">
+</head>
+<body>
+<nav><a href="../index.html">База знаний Samba AD DC</a></nav>
+<main><h1>Диагностика Samba AD DC</h1>
+<h2>Суть</h2>
+<p>Страница — отправная точка для поиска и устранения проблем контроллера домена (DC) Samba: проверка запущенных процессов, разбор типовых ошибок DNS при присоединении DC к домену и ссылки на специализированные страницы диагностики (уровень логирования, DNS-бэкенды, SELinux, проблемы после обновления). Отдельно разобраны две ошибки join — <code>WERR_DNS_ERROR_RCODE_NAME_ERROR</code> (bug 13298, Samba 4.7+) и <code>WERR_DNS_ERROR_ZONE_DOES_NOT_EXIST</code> — с пошаговым обходом через репликацию DNS-партиций.</p>
+<h2>Ключевое</h2>
+<h3>Общие вопросы</h3>
+<ul>
+<li>Настройка уровня логирования Samba — см. отдельную страницу Setting the Samba Log Level.</li>
+<li>Ошибка «The net Command Fails to Connect to the 127.0.0.1 IP Address» — описана на странице Troubleshooting Samba Domain Members (см. <a href="Samba-%D0%BA%D0%B0%D0%BA-%D1%87%D0%BB%D0%B5%D0%BD-%D0%B4%D0%BE%D0%BC%D0%B5%D0%BD%D0%B0.html">Samba как член домена</a>).</li>
+<li>Ошибки join на Rocky Linux 8: сообщалось, что самособранная Samba на Rocky Linux (по-видимому, то же относится к RHEL, Alma Linux и т.п.) не может присоединить другой DC. Причина — включённый режим FIPS: нужно выключить его на всех RHEL-based DC, перезагрузить их все и повторить join.</li>
+</ul>
+<h3>Проверка, что Samba запущена</h3>
+<p>Утилитой <code>ps</code> убедиться, что процессы Samba выполняются:</p>
+<pre><code># ps axf | egrep &quot;samba|smbd|winbindd&quot;
+...
+917 ?        Ss     0:00 /usr/local/samba/sbin/samba -D
+923 ?        S      0:00  \_ /usr/local/samba/sbin/samba -D
+936 ?        Ss     0:00  |   \_ /usr/local/samba/sbin/smbd -D --option=server role check:inhibit=yes --foreground
+940 ?        S      0:00  |       \_ /usr/local/samba/sbin/smbd -D --option=server role check:inhibit=yes --foreground
+941 ?        S      0:00  |       \_ /usr/local/samba/sbin/smbd -D --option=server role check:inhibit=yes --foreground
+943 ?        S      0:00  |       \_ /usr/local/samba/sbin/smbd -D --option=server role check:inhibit=yes --foreground
+924 ?        S      0:00  \_ /usr/local/samba/sbin/samba -D
+925 ?        S      0:00  \_ /usr/local/samba/sbin/samba -D
+...
+935 ?        Ss     0:00  |   \_ /usr/local/samba/sbin/winbindd -D --option=server role check:inhibit=yes --foreground
+939 ?        S      0:00  |       \_ /usr/local/samba/sbin/winbindd -D --option=server role check:inhibit=yes --foreground
+...
+</code></pre>
+<ul>
+<li>Контроллеры домена Samba не поддерживают сетевой просмотр (network browsing), поэтому процессов <code>nmbd</code> в выводе нет.</li>
+<li>Все процессы <code>samba</code>, <code>smbd</code> и <code>winbindd</code> обязаны быть дочерними процессами одного процесса <code>samba</code>.</li>
+<li>Если структура процессов выглядит иначе:
+<ul>
+<li>проверить лог-файлы Samba, чтобы найти проблему; для детального вывода поднять уровень логирования;</li>
+<li>запустить Samba интерактивно и наблюдать вывод:</li>
+</ul>
+</li>
+</ul>
+<pre><code># samba -i
+</code></pre>
+<h3>DNS: диагностика по бэкендам</h3>
+<ul>
+<li>Samba INTERNAL_DNS Back End — Troubleshooting (см. <a href="%D0%92%D0%BD%D1%83%D1%82%D1%80%D0%B5%D0%BD%D0%BD%D0%B8%D0%B9-DNS-%D0%B1%D1%8D%D0%BA%D0%B5%D0%BD%D0%B4.html">Внутренний DNS бэкенд</a>).</li>
+<li>BIND9_DLZ DNS Back End — Troubleshooting.</li>
+</ul>
+<h3>Проблемы DNS при join DC</h3>
+<p><strong>DNS rcode name error.</strong> Есть баг добавления DNS-записей при присоединении к домену — bug 13298; он должен затрагивать только Samba v4.7 и новее. Join падает после «Adding DNS A record … for IPv4 IP: …» и «Join failed - cleaning up» (с удалением созданных объектов: RID Set, учётной записи DC, dns-учётки, NTDS Settings, записи сервера) с финальной ошибкой:</p>
+<pre><code>ERROR(runtime): uncaught exception - (9003, 'WERR_DNS_ERROR_RCODE_NAME_ERROR')
+  File &quot;/usr/lib64/python2.7/site-packages/samba/join.py&quot;, line 1178, in join_add_dns_records
+    dns_partition=domaindns_zone_dn)
+  File &quot;/usr/lib64/python2.7/site-packages/samba/samdb.py&quot;, line 1069, in dns_lookup
+    dns_partition=dns_partition)
+</code></pre>
+<p><strong>DNS zone does not exist.</strong> Аналогичный трейс заканчивается так:</p>
+<pre><code>ERROR(runtime): uncaught exception - (9601, 'WERR_DNS_ERROR_ZONE_DOES_NOT_EXIST')
+</code></pre>
+<p>Ошибки name/zone могут возникать по разным причинам; name-ошибка встречается заметно чаще (особенно против Windows). Если домен мигрирован с Windows 2000 или 2003 (включая R2-варианты и, возможно, 2008 non-R2), DNS-зоны могли быть мигрированы некорректно: устаревшие расположения DNS-зон в Samba не поддерживаются — поддерживаются только полностью реплицируемые AD DNS-зоны (ForestDnsZones, DomainDnsZones). Если ошибка указывает, что зоны может не существовать, возможно, стандартная AD-зона вообще не создана (несмотря на то, что записи из этого расположения как будто отдаются). Один из способов гарантировать, что DNS-записи находятся только в современных расположениях, — полный реимпорт DNS-базы через PowerShell.</p>
+<p>Если ошибки — не следствие проблем миграции, а проблема работающего сервера, доступен обход:</p>
+<p>Выполнение шагов не по порядку может привести к проблемам репликации из-за того, что некоторые объекты будут созданы дважды.</p>
+<ol>
+<li>При <code>samba-tool domain join</code> указать опцию командной строки <code>--dns-backend=NONE</code>.</li>
+<li>Выполнить <code>samba-tool drs replicate</code> партиций <code>DC=ForestDnsZones</code> и <code>DC=DomainDnsZones</code> с опциями <code>--local --full-sync</code>.</li>
+<li>Запустить <code>samba_upgradedns</code> против базы нового DC.</li>
+<li>Выполнить <code>samba-tool dbcheck</code> с опцией <code>--cross-ncs</code>, чтобы исправить расхождения при создании партиций.</li>
+</ol>
+<p>Опционально после этого можно запустить <code>samba-tool ldapcmp</code>, чтобы убедиться в согласованности баз (учитывая, что атрибуты <code>msDs-masteredBy</code>, <code>msDS-NC-Replica-Locations</code>, <code>msDS-hasMasterNCs</code> были изменены).</p>
+<p><strong>Другие проблемы совместимости с Windows</strong> (для доменов, мигрированных с Windows 2003 R2 или ранее) — см. страницу Windows Server Compatibility.</p>
+<h3>SELinux</h3>
+<p>См. страницу Troubleshooting SELinux on a Samba AD DC.</p>
+<h3>Обновления</h3>
+<p>Если после обновления Samba возникли проблемы с контроллером домена — см. Notable Enhancements and Changes (страница Updating Samba).</p>
+<h2>Подводные камни</h2>
+<ul>
+<li>На DC нет процессов <code>nmbd</code>: контроллеры домена не поддерживают network browsing, и это норма, а не проблема.</li>
+<li>Все процессы <code>samba</code>, <code>smbd</code>, <code>winbindd</code> должны быть дочерними к одному родительскому процессу <code>samba</code> — иная структура означает неисправность.</li>
+<li>Bug 13298 (добавление DNS-записей при join) затрагивает только Samba v4.7 и новее.</li>
+<li>Samba поддерживает только полностью реплицируемые AD DNS-зоны (ForestDnsZones, DomainDnsZones); устаревшие расположения зон (после миграции с Windows 2000/2003) не поддерживаются.</li>
+<li>Шаги обхода DNS-ошибок при join выполнять строго в указанном порядке: при нарушении порядка возможны проблемы репликации из-за повторного создания объектов.</li>
+<li>После обхода атрибуты <code>msDs-masteredBy</code>, <code>msDS-NC-Replica-Locations</code>, <code>msDS-hasMasterNCs</code> изменены — расхождения <code>samba-tool ldapcmp</code> именно по ним не считаются ошибкой.</li>
+<li>Режим FIPS на RHEL-подобных системах блокирует join: выключить его на всех RHEL-based DC и перезагрузить их все.</li>
+</ul>
+<h2>Связанные заметки</h2>
+<ul>
+<li><a href="%D0%9F%D1%80%D0%B8%D1%81%D0%BE%D0%B5%D0%B4%D0%B8%D0%BD%D0%B5%D0%BD%D0%B8%D0%B5-%D0%B2%D1%82%D0%BE%D1%80%D0%BE%D0%B3%D0%BE-DC-%D0%BA-%D0%B4%D0%BE%D0%BC%D0%B5%D0%BD%D1%83.html">Присоединение второго DC к домену</a></li>
+<li><a href="%D0%92%D0%BD%D1%83%D1%82%D1%80%D0%B5%D0%BD%D0%BD%D0%B8%D0%B9-DNS-%D0%B1%D1%8D%D0%BA%D0%B5%D0%BD%D0%B4.html">Внутренний DNS бэкенд</a></li>
+<li><a href="%D0%A3%D0%BF%D1%80%D0%B0%D0%B2%D0%BB%D0%B5%D0%BD%D0%B8%D0%B5-%D1%81%D0%BB%D1%83%D0%B6%D0%B1%D0%BE%D0%B9-AD-DC.html">Управление службой AD DC</a></li>
+<li><a href="Samba-%D0%BA%D0%B0%D0%BA-%D1%87%D0%BB%D0%B5%D0%BD-%D0%B4%D0%BE%D0%BC%D0%B5%D0%BD%D0%B0.html">Samba как член домена</a></li>
+<li><a href="%D0%9C%D0%BE%D0%BD%D0%B8%D1%82%D0%BE%D1%80%D0%B8%D0%BD%D0%B3-%D0%B8-%D0%B0%D0%B2%D1%82%D0%BE%D0%BC%D0%B0%D1%82%D0%B8%D0%B7%D0%B0%D1%86%D0%B8%D1%8F-Samba-AD-DC.html">Мониторинг и автоматизация Samba AD DC</a></li>
+</ul>
+</main>
+</body>
+</html>

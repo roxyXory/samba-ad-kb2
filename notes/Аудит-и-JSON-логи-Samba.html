@@ -1,0 +1,231 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Аудит и JSON-логи Samba AD DC</title>
+<link rel="stylesheet" href="../style.css">
+</head>
+<body>
+<nav><a href="../index.html">База знаний Samba AD DC</a></nav>
+<main><h1>Аудит и JSON-логи Samba AD DC</h1>
+<h2>Суть</h2>
+<p>Samba AD DC умеет писать события аудита — удачные и неудачные аутентификации, авторизации и изменения базы <code>sam.ldb</code> — в свой debug-лог через отдельные debug-классы (<code>auth_audit</code>, <code>dsdb_audit</code>, <code>dsdb_password_audit</code>, <code>dsdb_group_audit</code>, <code>dsdb_transaction_audit</code> и их JSON-варианты), не поднимая общий уровень логирования. Аудит — локальная настройка: его включают на каждом сервере отдельно, и событие пишет тот сервер, который его обработал. JSON-формат — основа для централизованного сбора (rsyslog <code>imfile</code>) и для блокировки перебора паролей через fail2ban по полю <code>remoteAddress</code>. Формат JSON-строк менялся в 4.25 (убраны два ведущих пробела, встроенные переводы строк заменены пробелами — см. «Подводные камни»), а 4.24 добавила новые логируемые атрибуты и ещё одно значение поля <code>action</code> (<code>&quot;Auth info change&quot;</code>) — это не смена формата, но парсеры и фильтры fail2ban всё равно стоит проверять при обновлении.</p>
+<h2>Ключевое</h2>
+<h3>Что и с какой версии логируется</h3>
+<ul>
+<li>Samba 4.7 и новее — аудит аутентификации и авторизации (debug-классы <code>auth_audit</code> и <code>auth_json_audit</code>; в release notes 4.7 сказано: подробная информация аудита пишется в debug-логи под классом <code>auth_audit</code>, «including in particular the client IP address triggering the audit line», а при сборке с библиотекой jansson — JSON-представление под классом <code>auth_json_audit</code>).</li>
+<li>Samba 4.9 — аудит изменений базы AD DC: изменения <code>sam.ldb</code> пишутся под <code>dsdb_audit</code> / <code>dsdb_json_audit</code>, транзакции — под <code>dsdb_transaction_audit</code> / <code>dsdb_transaction_json_audit</code>, смена паролей — под <code>dsdb_password_audit</code> / <code>dsdb_password_json_audit</code>, изменения членства в группах — под <code>dsdb_group_audit</code> / <code>dsdb_group_json_audit</code> (release notes 4.9). Там же: Jansson по умолчанию требуется для сборки Samba; для сборок <code>--without-ad-dc</code> JSON-аудит отключается опцией <code>--without-json-audit</code> при configure (это историческое имя той же по смыслу опции, которая в текущих версиях называется <code>--without-json</code> — см. ниже). В release notes 4.9 также отмечено, что длительность аутентификации для NTLM и Kerberos KDC попадает только в JSON-записи.</li>
+<li>Samba 4.24 — классы <code>dsdb_password_audit</code> и <code>dsdb_password_json_audit</code> дополнительно логируют изменения атрибутов, связанных с аутентификацией: <code>altSecurityIdentities</code>, <code>dNSHostName</code>, <code>msDS-AdditionalDnsHostName</code>, <code>msDS-KeyCredentialLink</code>, <code>servicePrincipalName</code>; в JSON-логе такие изменения имеют значение <code>&quot;Auth info change&quot;</code> в поле <code>&quot;action&quot;</code> (release notes 4.24.0 от 18 марта 2026).</li>
+<li>Samba 4.25 (первые стабильные release notes от 24 сентября 2026) изменила формат JSON-строк, см. ниже раздел «Подводные камни».</li>
+<li>Аудит — локальная настройка: «Audit logging is a local setting and you must enable this feature on each Samba server individually. Events are logged on the Samba server the event was performed on.» В домене с несколькими DC запрос аутентификации пишет только тот DC, которому он был адресован.</li>
+<li>Покрытие: аутентификация и авторизация пользовательских учёток полноценно аудируются только на Samba AD DC; в файловом сервере и члене домена покрываются NTLM-аутентификация, авторизация SMB и RPC («support is comprehensive only in the AD DC»).</li>
+<li>Логируются и успешные, и неудачные события аутентификации, а из авторизации — только успешные: «Samba supports logging of successful authorization events but not unsuccessful authorization events. It can log both successful and unsuccessful authentication events.» При NTLM события authentication и authorization пишутся парой; при Kerberos аутентификацию фиксирует KDC (на члене домена событие аутентификации не появится), а авторизация — при каждом обращении к сервису.</li>
+<li>Парольные события попадают в два места: изменения пароля логируются под <code>dsdb_password_audit</code> и одновременно видны как события аутентификации через <code>auth_audit</code> (man-страница <code>smb.conf(5)</code>).</li>
+</ul>
+<h3>Debug-классы и уровни (smb.conf(5), версия man-страницы — 4.25.0)</h3>
+<p>В man-странице <code>log level</code> перечислены классы аудита: <code>auth_audit</code>, <code>auth_json_audit</code>, <code>dsdb_audit</code>, <code>dsdb_json_audit</code>, <code>dsdb_password_audit</code>, <code>dsdb_password_json_audit</code>, <code>dsdb_transaction_audit</code>, <code>dsdb_transaction_json_audit</code>, <code>dsdb_group_audit</code>, <code>dsdb_group_json_audit</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Класс (текстовый / JSON)</th>
+<th>Что логирует</th>
+<th>Уровни (дословно из man-страницы)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>auth_audit</code> / <code>auth_json_audit</code></td>
+<td>аутентификация и авторизация</td>
+<td><code>2</code>: Authentication Failure; <code>3</code>: Authentication Success; <code>4</code>: Authorization Success; <code>5</code>: Anonymous Authentication and Authorization Success</td>
+</tr>
+<tr>
+<td><code>dsdb_audit</code> / <code>dsdb_json_audit</code></td>
+<td>изменения базы <code>sam.ldb</code> AD DC</td>
+<td><code>5</code>: Database modifications; <code>5</code>: Replicated updates from another DC</td>
+</tr>
+<tr>
+<td><code>dsdb_group_audit</code> / <code>dsdb_group_json_audit</code></td>
+<td>изменения членства в группах в <code>sam.ldb</code></td>
+<td>те же уровни <code>5</code>, что и у <code>dsdb_*</code> (в man-странице уровни перечислены одним списком для <code>dsdb_audit</code>, <code>dsdb_json_audit</code>, <code>dsdb_group_audit</code>, <code>dsdb_group_json_audit</code>)</td>
+</tr>
+<tr>
+<td><code>dsdb_password_audit</code> / <code>dsdb_password_json_audit</code></td>
+<td>смена и сброс пароля, а также изменения аутентификационных атрибутов (список в 4.24+)</td>
+<td><code>5</code>: Successful password changes and resets, and authentication related attribute changes</td>
+</tr>
+<tr>
+<td><code>dsdb_transaction_audit</code> / <code>dsdb_transaction_json_audit</code></td>
+<td>откаты транзакций и сбои prepare commit</td>
+<td><code>5</code>: Transaction failure (rollback); <code>10</code>: Transaction success (commit)</td>
+</tr>
+</tbody>
+</table>
+<p>Дополнительно из man-страницы:</p>
+<ul>
+<li>JSON-вариант пишется, «if Samba was not compiled with <code>--without-json</code>».</li>
+<li>Про два configure-флага: это одна и та же по смыслу опция — отключение JSON-поддержки целиком (вместе с JSON-аудитом). В 4.9 она называлась <code>--without-json-audit</code> (жила в <code>lib/audit_logging/wscript</code> и требовала <code>--without-ad-dc</code>); в текущих версиях это <code>--without-json</code> (верхнеуровневый <code>wscript</code>: «Build without JSON support», тоже требует <code>--without-ad-dc</code>, потому что JSON нужен и AD DC, и JSON-формату аудита, и JSON-выводу <code>net</code>). Отдельного флага «только JSON-аудит» нет.</li>
+<li>В JSON-логе <code>dsdb_password_json_audit</code> изменения аутентификационных атрибутов получают в поле <code>&quot;action&quot;</code> значение <code>&quot;Auth info change&quot;</code>, а смена и сброс пароля — <code>&quot;change&quot;</code> и <code>&quot;reset&quot;</code> — так пишет man-страница; фактический код возвращает <code>&quot;Change&quot;</code> и <code>&quot;Reset&quot;</code> с заглавной буквы (см. «Подводные камни»).</li>
+<li>Про транзакции: «Audit logs are already generated and sent to the system logs before the transaction is complete. Logging the transaction details allows the identification of password and <code>sam.ldb</code> operations that have been rolled back, and so have not actually persisted.»</li>
+<li>Значение по умолчанию: <code>log level = 0</code>. Действует правило: более высокий уровень включает и события более низких уровней (так же сформулировано в вики).</li>
+</ul>
+<h3>Включение аудита</h3>
+<p>Проверить, что сборка вообще умеет JSON (вики, раздел «Verifying if JSON Support is Enabled in Samba»):</p>
+<pre><code class="language-bash"># smbd -b | grep HAVE_JSON_OBJECT
+HAVE_JSON_OBJECT
+</code></pre>
+<p>Если вывода нет — Samba собрана без поддержки JSON (нужны заголовочные файлы <code>jansson</code> и пересборка). Классический пример включения аутентификационного аудита (значение по умолчанию <code>1</code>, для классов — <code>3</code>, т.е. неудачи и успехи) из вики:</p>
+<pre><code class="language-ini">log level = 1 auth_audit:3 auth_json_audit:3
+</code></pre>
+<p>Включение аудита изменений базы AD DC в JSON (из вики):</p>
+<pre><code class="language-ini">log level = 1 dsdb_json_audit:5 dsdb_password_json_audit:5 dsdb_group_json_audit:5 dsdb_transaction_json_audit:5
+</code></pre>
+<p>После изменения <code>log level</code> нужно перезапустить Samba (вики: «Restart Samba.»). Вывод одного класса в отдельный файл — суффикс <code>@PATH</code>:</p>
+<pre><code class="language-ini">log level = 1 auth_json_audit:3@/var/log/samba/samba_audit.log
+</code></pre>
+<p>Синтаксис <code>@PATH</code> документирован в man-странице <code>log level</code>: «To configure the logging for specific classes to go into a different file then <code>log file</code>, you can append <code>@PATH</code> to the class, eg <code>log level = 1 full_audit:1@/var/log/audit.log</code>». Пример именно с <code>auth_json_audit:3@/var/log/samba/samba_audit.log</code> даёт документация Tranquil IT и помечает эту конфигурацию как «Added in version 4.10»; проверка по man-страницам подтверждает: в <code>smb.conf(5)</code> для 4.10 предложение про <code>@PATH</code> уже есть, а в версии для 4.9 его ещё нет (см. раздел «Источники»).</p>
+<h3>Форматы записей</h3>
+<p>Текстовый формат доступен всегда, без дополнительных библиотек. Пример успешной авторизации из вики (обратите внимание на два ведущих пробела в строке сообщения — до 4.25 так выглядели и JSON-строки):</p>
+<pre><code>[2017/07/04 21:07:41.410381,  4, pid=21757] ../auth/auth_log.c:848(log_successful_authz_event_human_readable)
+  Successful AuthZ: [SMB2,krb5] user [SAMDOM]\[Administrator] [S-1-5-21-469703510-2364959079-1506205053-500] at [Di, 04 Jul 2017 21:07:41.410364 CEST] Remote host [ipv4:10.99.0.81:58828] local host [ipv4:10.99.0.1:445]
+</code></pre>
+<p>Пример JSON-записи из вики (Samba 4.7):</p>
+<pre><code>  {&quot;type&quot;: &quot;Authorization&quot;, &quot;timestamp&quot;: &quot;2017-07-04T21:07:41.410408+0200&quot;, &quot;Authorization&quot;: {&quot;version&quot;: {&quot;major&quot;: 1, &quot;minor&quot;: 0}, &quot;sid&quot;: &quot;S-1-5-21-469703510-2364959079-1506205053-500&quot;, &quot;serviceDescription&quot;: &quot;SMB2&quot;, &quot;localAddress&quot;: &quot;ipv4:10.99.0.1:445&quot;, &quot;remoteAddress&quot;: &quot;ipv4:10.99.0.81:58828&quot;, &quot;transportProtection&quot;: &quot;SMB&quot;, &quot;authType&quot;: &quot;krb5&quot;, &quot;domain&quot;: &quot;SAMDOM&quot;, &quot;account&quot;: &quot;Administrator&quot;, &quot;logonServer&quot;: &quot;DC1&quot;, &quot;accountFlags&quot;: &quot;0x00000210&quot;}}
+</code></pre>
+<p>Структура верхнего уровня: <code>timestamp</code>, <code>type</code> и объект данных, ключ которого совпадает с <code>type</code>. Значения <code>type</code>: <code>Authentication</code>, <code>Authorization</code>, <code>dsdbChange</code>, <code>dsdbTransaction</code>, <code>passwordChange</code>, <code>replicatedUpdate</code>, <code>groupChange</code>. Вики отдельно предупреждает: примеры на странице переформатированы для читаемости, а реальный JSON аудита «will always be formatted on a single line».</p>
+<p>Поле <code>version</code> у каждого типа — версия формата JSON: <code>major</code> увеличивается, если поля меняют смысл, <code>minor</code> — если поле добавлено; изменение набора возможных значений (например, поддерживаемых форматов пароля в <code>passwordType</code>) версию обычно не меняет.</p>
+<h3>Разбор JSON-событий</h3>
+<p>Атрибуты по типам (страница вики «Interpreting JSON Audit Logs», правка от 13 января 2023):</p>
+<ul>
+<li><code>Authentication</code> (<code>version</code> = <code>{&quot;major&quot;: 1, &quot;minor&quot;: 2}</code>): <code>authDescription</code> (тип аутентификации: <code>&quot;simple bind&quot;</code>, <code>&quot;simple bind/TLS&quot;</code>, <code>&quot;guest&quot;</code>, <code>&quot;bare-NTLM&quot;</code>, <code>&quot;plaintext&quot;</code>, <code>&quot;interactive&quot;</code>, <code>&quot;network&quot;</code>, <code>&quot;Unknown Auth Description&quot;</code>/<code>&quot;Unknown Pre-authentication&quot;</code> для событий KDC, <code>&quot;ServerAuthenticate&quot;</code>, <code>&quot;LDAP Modify&quot;</code> — «this is a password change, not strictly an authentication event, but logged here so you don't miss it»), <code>becameAccount</code> / <code>becameDomain</code> / <code>becameSid</code>, <code>clientAccount</code> / <code>clientDomain</code>, <code>mappedAccount</code> / <code>mappedDomain</code>, <code>duration</code> (микросекунды), <code>eventId</code>, <code>localAddress</code>, <code>logonId</code> (случайный 64-битный идентификатор для сквозной трассировки), <code>logonType</code> (2 — Interactive, 3 — Network, 8 — NetworkCleartext), <code>netlogon*</code>-поля, <code>passwordType</code>, <code>remoteAddress</code>, <code>serviceDescription</code> (<code>&quot;LDAP&quot;</code>, <code>&quot;SMB2&quot;</code>, <code>&quot;NETLOGON&quot;</code>), <code>status</code>, <code>workstation</code>. Неприменимые атрибуты могут присутствовать с пустыми значениями (<code>&quot;null&quot;</code>, <code>&quot;0x00000000&quot;</code>). Поле <code>status</code> — сообщение NT STATUS; при успехе <code>&quot;NT_STATUS_OK&quot;</code>, типовые ошибки: <code>NT_STATUS_ACCESS_DENIED</code>, <code>NT_STATUS_WRONG_PASSWORD</code>, <code>NT_STATUS_NO_SUCH_USER</code>, <code>NT_STATUS_NO_SUCH_DOMAIN</code>, <code>NT_STATUS_ACCOUNT_RESTRICTION</code>, <code>NT_STATUS_DOWNGRADE_DETECTED</code> и др. (полный перечень — на странице вики).</li>
+<li><code>Authorization</code> (<code>version</code> = <code>{&quot;major&quot;: 1, &quot;minor&quot;: 1}</code>): <code>account</code>, <code>accountFlags</code>, <code>authType</code> (<code>&quot;krb5&quot;</code>, <code>&quot;NTLMSSP&quot;</code>, <code>&quot;simple bind&quot;</code>), <code>domain</code>, <code>localAddress</code>, <code>logonServer</code>, <code>remoteAddress</code>, <code>serviceDescription</code>, <code>sessionId</code> (GUID сессии), <code>sid</code>, <code>transportProtection</code> (<code>&quot;SMB&quot;</code>, <code>&quot;TLS&quot;</code>, <code>&quot;SEAL&quot;</code>, <code>&quot;NONE&quot;</code>).</li>
+<li><code>dsdbChange</code> (<code>version</code> = <code>{&quot;major&quot;: 1, &quot;minor&quot;: 0}</code>): <code>dn</code>, <code>operation</code> (<code>&quot;Modify&quot;</code>, <code>&quot;Add&quot;</code>, <code>&quot;Delete&quot;</code>), <code>attributes</code>, <code>performedAsSystem</code> (<code>true</code>, если Samba действует от системной учётки), <code>remoteAddress</code>, <code>sessionId</code>, <code>status</code> (строка) и <code>statusCode</code> (число, эквивалент LDAP result code из RFC4511: <code>&quot;Success&quot;</code>, <code>&quot;insufficient access rights&quot;</code>, <code>&quot;No such object&quot;</code>, <code>&quot;Entry already exists&quot;</code> и т.п.), <code>transactionId</code>, <code>userSid</code>. Блок <code>attributes</code> эквивалентен LDIF-станзам: <code>action</code> — <code>add</code>, <code>replace</code> или <code>delete</code>; секретные значения заменяются на <code>redacted: true</code>; значения длиннее 1024 байт обрезаются с флагом <code>truncated</code> и многоточием; значения с непечатаемыми символами кодируются в base64 (<code>base64: true</code>). Пример из вики:</li>
+</ul>
+<pre><code class="language-json">&quot;dsdbChange&quot;: {
+  &quot;operation&quot;: &quot;Modify&quot;,
+  &quot;dn&quot;: &quot;@SAMBA_DSDB&quot;,
+  &quot;attributes&quot;: {
+   &quot;backupDate&quot;: {&quot;actions&quot;: [
+     {&quot;action&quot;: &quot;add&quot;,
+      &quot;values&quot;: [
+        {&quot;value&quot;: &quot;2023-01-14T09-43-55.333333&quot;}
+       ]
+     }
+   ]
+  }}}
+</code></pre>
+<p>чему соответствует LDIF:</p>
+<pre><code>dn: @SAMBA_DSDB
+changetype: modify
+add: backupDate
+backupDate: 2023-01-14T09-43-55.333333
+</code></pre>
+<ul>
+<li><code>dsdbTransaction</code> (<code>version</code> = <code>{&quot;major&quot;: 1, &quot;minor&quot;: 0}</code>): <code>action</code> (<code>&quot;begin&quot;</code>, <code>&quot;commit&quot;</code>, <code>&quot;rollback&quot;</code>), <code>duration</code> (микросекунды), <code>transactionId</code> (GUID, который связывает записи о транзакции с входящими в неё <code>dsdbChange</code>).</li>
+<li><code>passwordChange</code> (<code>version</code> = <code>{&quot;major&quot;: 1, &quot;minor&quot;: 1}</code>): частный случай <code>dsdbChange</code>; <code>action</code> (<code>&quot;Change&quot;</code> или <code>&quot;Reset&quot;</code>), <code>dn</code>, <code>eventId</code> (4723 — change, 4724 — reset), <code>remoteAddress</code>, <code>sessionId</code>, <code>status</code>, <code>statusCode</code>, <code>transactionId</code>, <code>userSid</code> (SID того, кто меняет пароль, а не обязательно того, кому меняют).</li>
+<li><code>groupChange</code> (<code>version</code> = <code>{&quot;major&quot;: 1, &quot;minor&quot;: 1}</code>): <code>action</code> (<code>&quot;Removed&quot;</code>, <code>&quot;Added&quot;</code>, <code>&quot;PrimaryGroup&quot;</code>), <code>eventId</code>, <code>group</code> (DN группы), <code>remoteAddress</code>, <code>sessionId</code>, <code>status</code>, <code>statusCode</code>, <code>transactionId</code>, <code>user</code> (DN пользователя, чьё членство меняется), <code>userSid</code> (SID того, кто вносит изменение). Возможные <code>eventId</code>: 4728/4729 — добавление/удаление из глобальной security-группы, 4732/4733 — локальной security-группы, 4746/4747 — локальной группы, 4751/4752 — глобальной группы, 4756/4757 — универсальной security-группы, 4761/4762 — универсальной группы.</li>
+<li><code>replicatedUpdate</code>: в вики есть только заголовок раздела, описание полей отсутствует (на дату правки страницы).</li>
+</ul>
+<h3>Централизация логов</h3>
+<ul>
+<li>Вики рекомендует для сбора логов на одном сервере настроить централизованный syslog: «configure Samba to log to the syslog daemon, and configure the syslog daemon to send the logs to the centralized server»; в качестве шлюза для отправки упоминаются параметры <code>logging</code>, <code>syslog</code> и <code>syslog only</code> из <code>smb.conf(5)</code>.</li>
+<li>В <code>smb.conf(5)</code> (4.25.0) параметр <code>logging</code> задаёт список бэкендов вида <code>backend[:option][@loglevel]</code>; доступные бэкенды: <code>syslog</code>, <code>file</code>, <code>systemd</code>, <code>lttng</code>, <code>gpfs</code>, <code>ringbuf</code>; пример: <code>logging = syslog@1 file</code>. Когда <code>logging</code> задан, он переопределяет параметры <code>syslog</code> и <code>syslog only</code>. Параметр <code>syslog</code> отображает уровни отладки Samba на уровни syslog: 0 → <code>LOG_ERR</code>, 1 → <code>LOG_WARNING</code>, 2 → <code>LOG_NOTICE</code>, 3 → <code>LOG_INFO</code>, всё выше — <code>LOG_DEBUG</code>.</li>
+<li>Практический вариант от Tranquil IT (документация Samba-AD) — не через syslog-бэкенд Samba, а по файлу: класс <code>auth_json_audit</code> пишется в отдельный файл, а rsyslog читает его модулем <code>imfile</code> и пересылает по TCP. Важное замечание оттуда: «Samba RPM packages are not compiled with direct rsyslog support. You must then configure rsyslog to monitor Samba logs.» Конфигурация на отправляющем хосте (в файле <code>/etc/rsyslog.d/send_samba.conf</code>; параметры <code>File</code>, <code>Tag</code>, <code>Severity</code>, <code>Facility</code> — из документации модуля <code>imfile</code>):</li>
+</ul>
+<pre><code>module(load=&quot;imfile&quot; PollingInterval=&quot;10&quot;) #needs to be done just once
+input(type=&quot;imfile&quot;
+      File=&quot;/var/log/samba/samba_audit.log&quot;
+      Tag=&quot;samba_auth&quot;
+      Severity=&quot;info&quot;
+      Facility=&quot;auth&quot;)
+if ($syslogtag == &quot;samba_auth&quot;) then {
+    action(type=&quot;omfwd&quot; target=&quot;143.126.200.167&quot; port=&quot;514&quot; protocol=&quot;tcp&quot;
+           action.resumeRetryCount=&quot;100&quot;
+           queue.type=&quot;linkedList&quot; queue.size=&quot;10000&quot;)
+}
+</code></pre>
+<p>перезапуск: <code>systemctl restart rsyslog</code>. На хосте-сборщике (файл <code>/etc/rsyslog.d/recv_samba.conf</code>) — приём по TCP и запись по тегу:</p>
+<pre><code># Provides TCP syslog reception
+$ModLoad imtcp
+$InputTCPServerRun 514
+if ($syslogtag == &quot;samba_auth&quot;)  then /var/log/samba/audit_auth.log
+</code></pre>
+<p>(каталог <code>/var/log/samba</code> на сборщике создаётся заранее: <code>mkdir -p /var/log/samba</code>; затем <code>systemctl restart rsyslog</code>).</p>
+<ul>
+<li>Документация модуля rsyslog <code>imfile</code> полезна ещё двумя параметрами: <code>PollingInterval</code> — «Seconds between file scans in polling mode; default 10» (именно это значение задано в примере Tranquil IT) и экспериментальный <code>reopenOnTruncate</code> — «reopen the input file if it was truncated without changing its inode».</li>
+</ul>
+<h3>Блокировка перебора: fail2ban</h3>
+<p>Логика от Tranquil IT: AD-политики сами блокируют учётку после нескольких неудачных попыток, но это открывает путь к DoS — злоумышленник перебором паролей блокирует чужие учётки; поэтому рекомендуется блокировать не учётку, а IP-адрес источника через fail2ban.</p>
+<p>Предварительно включается вывод аудита в отдельный файл:</p>
+<pre><code class="language-ini">log level = 1 auth_json_audit:3@/var/log/samba/auth_json_audit.log
+</code></pre>
+<p>Фильтр <code>/etc/fail2ban/filter.d/samba.conf</code> (дословно):</p>
+<pre><code>[Definition]
+failregex = NT_STATUS_WRONG_PASSWORD.*remoteAddress&quot;: &quot;ipv4:&lt;HOST&gt;:
+</code></pre>
+<p>Тюрьма <code>/etc/fail2ban/jail.d/samba.conf</code> (дословно):</p>
+<pre><code>[samba]
+filter = samba
+enabled = true
+action = iptables-multiport[name=samba, port=&quot;88,135,389,445,464,636,3328,3329&quot;, protocol=tcp]
+#   mail[name=samba, dest=technique@mondomaine.fr]
+logpath = /var/log/samba/auth_json_audit.log
+maxretry = 5
+findtime = 600
+bantime = 600
+</code></pre>
+<p>Исключения для доверенных адресов — файл <code>/etc/fail2ban/jail.d/customisation.local</code>:</p>
+<pre><code>[DEFAULT]
+ignoreip = 192.168.154.217
+</code></pre>
+<p>Запуск: <code>systemctl enable fail2ban</code> и <code>systemctl start fail2ban</code>. Разблокировка и просмотр: <code>fail2ban-client set samba unbanip &lt;COMPUTER_IP&gt;</code> и <code>fail2ban-client status samba</code>.</p>
+<p>Про <code>&lt;HOST&gt;</code> в регулярном выражении документация fail2ban говорит: это место, куда подставляется IP или доменное имя, которое нужно заблокировать; и предупреждает, что слабые регулярные выражения уязвимы к DoS — если удалённый пользователь может подставить в лог текст, попадающий в часть <code>&lt;HOST&gt;</code>, он способен заблокировать любой хост, поэтому <code>&lt;HOST&gt;</code> должен опираться на текст, сгенерированный приложением, а не пользователем (в нашем случае — на поле <code>remoteAddress</code> и префикс <code>ipv4:</code> из JSON-записи Samba).</p>
+<h2>Подводные камни</h2>
+<ul>
+<li><strong>Формат JSON изменился в 4.25.</strong> Release notes 4.25.0: «The two leading spaces before the opening '{' on JSON audit log lines have been removed. And any embedded new line characters '\n' are converted to spaces.» До 4.25 JSON-строка шла с двумя ведущими пробелами (это видно и по примеру на вики) и могла содержать встроенные переводы строк. Простейший парсер <code>json.loads(line)</code> без <code>strip()</code> на старых версиях падал, а парсер, «настроенный» на два пробела, ломается после обновления до 4.25. В коммите, внёсшем изменение (<code>lib:audit_logging JSON remove leading spaces</code>, 28.01.2026, bug 15898), старая строка <code>DEBUGADDC(debug_class, debug_level, (&quot;%s\n&quot;, s))</code> заменена на <code>DEBUGJSONC(debug_class, debug_level, (s))</code>, а в комментарии к новой функции <code>dbgjson()</code> в <code>lib/util/debug.c</code> прямо сказано: «msg is output without any added leading white space», «Any embedded &quot;\n&quot; characters are replaced with spaces».</li>
+<li><strong>Склейка длинных строк.</strong> Буфер форматирования debug-вывода ограничен (<code>FORMAT_BUFR_SIZE</code> = 4096 байт); в юнит-тесте <code>lib/util/tests/test_json_logging.c</code>, добавленном вместе с этими изменениями, сообщение длиной 5111 байт даёт не одну, а несколько записей (4095 и 1016 байт). Похоже, что очень длинная JSON-строка аудита может попасть в лог частями — парсеру, возможно, придётся склеивать такие записи. Это вывод из юнит-теста, а не документированное поведение.</li>
+<li><strong>Область и адресность.</strong> Аудит включается на каждом сервере отдельно; в домене с несколькими DC событие пишет только тот DC, который его обработал (без централизованного syslog картина будет неполной). Аутентификация через Kerberos пишется на DC (KDC), а не на члене домена; при NTLM — парой authentication + authorization.</li>
+<li><strong>Авторизация только успешная.</strong> Неудачные события авторизации Samba не логирует — по журналу нельзя судить о неуспешных авторизациях.</li>
+<li><strong>Двойной учёт парольных событий.</strong> Смена пароля попадает и в <code>dsdb_password_audit</code>, и в <code>auth_audit</code> как событие аутентификации (<code>authDescription = &quot;LDAP Modify&quot;</code>) — при подсчёте событий это даёт дубли.</li>
+<li><strong>Регистр значения <code>&quot;action&quot;</code> у парольных событий.</strong> Man-страница пишет <code>&quot;change&quot;</code>/<code>&quot;reset&quot;</code>, но код возвращает <code>&quot;Change&quot;</code>/<code>&quot;Reset&quot;</code> (<code>source4/dsdb/samdb/ldb_modules/audit_log.c</code>, функция <code>get_password_action</code>); юнит-тест <code>source4/dsdb/samdb/ldb_modules/tests/test_audit_log.c</code> проверяет именно заглавные — <code>assert_string_equal(&quot;Reset&quot;, …)</code> и <code>assert_string_equal(&quot;Change&quot;, …)</code>. Парсеру значение лучше сравнивать без учёта регистра.</li>
+<li><strong>Секреты и усечение.</strong> В <code>dsdbChange</code> секретные значения заменяются на <code>redacted: true</code>, значения длиннее 1024 байт обрезаются (<code>truncated: true</code>) — полного значения в логе не будет.</li>
+<li><strong>Правка базы в обход Samba не логируется.</strong> Предупреждение в <code>smb.conf(5)</code>: «Changes to <code>sam.ldb</code> made locally by the <code>root</code> user with direct access to the database are not logged to the system logs, but to the administrator's own console.» То есть локальный root-доступ к <code>sam.ldb</code> аудитом не покрывается — это и понятно, такой пользователь может просто отключить аудит.</li>
+<li><strong>fail2ban и NTLM.</strong> Документация Tranquil IT предупреждает: при NTLM-аутентификации к контроллеру домена подключается файловый сервер (а не сам клиент), поэтому надо настроить <code>ignoreip</code>, чтобы случайно не заблокировать собственный файловый сервер.</li>
+<li><strong>Фильтр fail2ban завязан на формат лога.</strong> <code>failregex</code> ищет подряд <code>NT_STATUS_WRONG_PASSWORD</code>, затем <code>remoteAddress&quot;: &quot;ipv4:&lt;HOST&gt;:</code> — то есть опирается на конкретные имена полей и префикс <code>ipv4:</code>. Изменение формата (или отсутствие поля <code>remoteAddress</code> для какого-то типа аутентификации) тихо ломает блокировку. Перед внедрением фильтр стоит проверить <code>fail2ban-regex</code> на реальном логе.</li>
+<li><strong>Порты в примере fail2ban.</strong> В тюрьме перечислены порты <code>88,135,389,445,464,636,3328,3329</code> (дословно из источника). В вики Samba порты глобального каталога — 3268/tcp и 3269/tcp (см. <a href="%D0%9F%D0%BE%D1%80%D1%82%D1%8B-AD-DC.html">Порты AD DC</a>); расхождение в источнике никак не поясняется, так что перед копированием конфигурации список портов стоит сверить со своей инфраструктурой.</li>
+<li><strong>Имя класса в man-странице.</strong> В перечислении уровней <code>smb.conf(5)</code> пишет «Log levels for <code>auth_audit</code> and <code>auth_audit_json</code> are…», хотя класс в списке классов и в документации Tranquil IT называется <code>auth_json_audit</code>. Используйте имя из списка классов.</li>
+<li><strong>Расхождение версий JSON-схемы.</strong> Пример JSON на вики (2017 год, Samba 4.7) содержит для <code>Authorization</code> значение <code>&quot;version&quot;: {&quot;major&quot;: 1, &quot;minor&quot;: 0}</code>, тогда как страница «Interpreting JSON Audit Logs» (2023) документирует для <code>Authorization</code> <code>{&quot;major&quot;: 1, &quot;minor&quot;: 1}</code>. Поле <code>minor</code> увеличивалось по мере добавления полей — парсер не должен жёстко фиксировать минорную версию.</li>
+<li><strong>Ротация.</strong> В <code>smb.conf(5)</code> описан только встроенный механизм самого debug-лога: <code>max log size</code> (в килобайтах, по умолчанию 5000) — «Samba periodically checks the size and if it is exceeded it will rename the file, adding a <code>.old</code> extension»; <code>0</code> означает отсутствие лимита. Отдельный файл, открытый через <code>@PATH</code>, в прочитанных источниках не описан — для него нужна внешняя ротация, а при сборе через rsyslog <code>imfile</code> учитывайте поведение при усечении файла (параметр <code>reopenOnTruncate</code>).</li>
+</ul>
+<h2>Источники</h2>
+<ul>
+<li>https://wiki.samba.org/index.php/Setting_up_Audit_Logging — основная страница вики: версии 4.7/4.9, локальность настройки, различия authentication/authorization, проверка <code>smbd -b | grep HAVE_JSON_OBJECT</code>, примеры <code>log level</code>, примеры текстовой и JSON-записи.</li>
+<li>https://wiki.samba.org/index.php/Interpreting_JSON_Audit_Logs — разбор типов событий: структура верхнего уровня, <code>version</code>, поля <code>Authentication</code>, <code>Authorization</code>, <code>dsdbChange</code> (в т.ч. <code>attributes</code>, <code>redacted</code>, <code>truncated</code>), <code>dsdbTransaction</code>, <code>passwordChange</code>, <code>groupChange</code>, оговорка про <code>replicatedUpdate</code>.</li>
+<li>https://www.samba.org/samba/docs/current/man-html/smb.conf.5.html — man-страница <code>smb.conf(5)</code> версии 4.25.0: параметр <code>log level</code> (список debug-классов, уровни 2/3/4/5, синтаксис <code>@PATH</code>, атрибуты <code>dsdb_password_audit</code>, уровни 5/10 для транзакций, предупреждение про правку <code>sam.ldb</code> под root), параметры <code>log file</code>, <code>logging</code>, <code>syslog</code>, <code>syslog only</code>, <code>max log size</code>.</li>
+<li>https://www.samba.org/samba/history/samba-4.25.0.html — release notes 4.25.0 (24 сентября 2026): изменение формата JSON-строк (убраны два ведущих пробела, переводы строк заменены пробелами).</li>
+<li>https://www.samba.org/samba/history/samba-4.24.0.html — release notes 4.24.0 (18 марта 2026): логирование изменений <code>altSecurityIdentities</code>, <code>dNSHostName</code>, <code>msDS-AdditionalDnsHostName</code>, <code>msDS-KeyCredentialLink</code>, <code>servicePrincipalName</code> классами <code>dsdb_password_audit</code>/<code>dsdb_password_json_audit</code> и значение <code>&quot;Auth info change&quot;</code> в JSON.</li>
+<li>https://www.samba.org/samba/history/samba-4.9.0.html — release notes 4.9.0: появление классов <code>dsdb_*_audit</code>/<code>dsdb_*_json_audit</code>, требование Jansson для AD DC, <code>--without-json-audit</code> для сборок без AD DC, длительность аутентификации только в JSON.</li>
+<li>https://gitlab.com/samba-team/samba/-/blob/samba-4.9.0/lib/audit_logging/wscript и https://gitlab.com/samba-team/samba/-/blob/master/wscript — сверка configure-флагов: в 4.9 опция называлась <code>--without-json-audit</code> («--without-json-audit requires --without-ad-dc»), в текущих версиях — <code>--without-json</code> («Build without JSON support»; тоже требует <code>--without-ad-dc</code>; JSON нужен JSON-аудиту, AD DC и JSON-выводу <code>net</code>).</li>
+<li>https://gitlab.com/samba-team/samba/-/blob/master/source4/dsdb/samdb/ldb_modules/audit_log.c и https://gitlab.com/samba-team/samba/-/blob/master/source4/dsdb/samdb/ldb_modules/tests/test_audit_log.c — фактические значения <code>&quot;Change&quot;</code>/<code>&quot;Reset&quot;</code> в поле <code>&quot;action&quot;</code> парольных событий (функция <code>get_password_action</code> и её юнит-тест); сверено с исходником Samba 4.22.11.</li>
+<li>https://www.samba.org/samba/history/samba-4.7.0.html — release notes 4.7.0: появление <code>auth_audit</code>/<code>auth_json_audit</code> и описание покрытия аудита.</li>
+<li>https://git.samba.org/?p=samba.git;a=commit;h=35cb872ab44ba9fe0782164a979c112705374cee — коммит <code>lib:audit_logging JSON remove leading spaces</code> (28.01.2026, bug 15898): замена <code>DEBUGADDC</code> на <code>DEBUGJSONC</code> в <code>lib/audit_logging/audit_logging.c</code>.</li>
+<li>https://git.samba.org/?p=samba.git;a=commitdiff;h=3c30c4740f40f633b5a71c772374e6c1283ec13c — diff коммита, добавляющего <code>dbgjson()</code> и макросы <code>DEBUGJSON</code>/<code>DEBUGJSONC</code>: комментарий про отсутствие ведущих пробелов и замену <code>&quot;\n&quot;</code> на пробелы, размер буфера <code>FORMAT_BUFR_SIZE</code> 4096.</li>
+<li>https://git.samba.org/?p=samba.git;a=commitdiff;h=b86bcc58b0ea43c4ab85e0030a9522c686877043 — diff с новым файлом юнит-тестов <code>lib/util/tests/test_json_logging.c</code> (поведение при сообщении длиннее буфера).</li>
+<li>https://samba.tranquil.it/doc/en/samba_advanced_methods/samba_configure_rsyslog.html — документация Tranquil IT: конфигурация <code>log level = 1 auth_json_audit:3@/var/log/samba/samba_audit.log</code>, файлы rsyslog <code>send_samba.conf</code>/<code>recv_samba.conf</code>, пометка «Added in version 4.10», предупреждение про RPM-сборки Samba без прямой поддержки rsyslog.</li>
+<li>https://samba.tranquil.it/doc/en/samba_advanced_methods/samba_ad_fail2ban.html — документация Tranquil IT: обоснование fail2ban вместо блокировки учёток, фильтр и тюрьма fail2ban с портами и <code>logpath</code>, <code>ignoreip</code>, команды <code>fail2ban-client</code>.</li>
+<li>https://www.rsyslog.com/doc/configuration/modules/imfile.html — документация модуля <code>imfile</code>: параметры <code>File</code>, <code>Tag</code>, <code>Facility</code>, <code>Severity</code>, <code>PollingInterval</code>, экспериментальный <code>reopenOnTruncate</code>.</li>
+<li>https://fail2ban.readthedocs.io/en/latest/filters.html — документация fail2ban: смысл <code>&lt;HOST&gt;</code> и предупреждение об уязвимости слабых <code>failregex</code> к DoS.</li>
+<li>https://www.samba.org/samba/docs/4.9/man-html/smb.conf.5.html и https://www.samba.org/samba/docs/4.10/man-html/smb.conf.5.html — сравнение man-страниц 4.9 и 4.10: предложение про <code>@PATH</code> появляется именно в 4.10 (проверено диффом разделов <code>log level</code>).</li>
+<li>https://wiki.samba.org/index.php/Samba_AD_DC_Port_Usage — список портов AD DC (порты глобального каталога 3268/3269), использован для сверки с примером fail2ban.</li>
+</ul>
+<h2>Связанные заметки</h2>
+<ul>
+<li><a href="%D0%94%D0%B8%D0%B0%D0%B3%D0%BD%D0%BE%D1%81%D1%82%D0%B8%D0%BA%D0%B0-AD-DC.html">Диагностика AD DC</a></li>
+<li><a href="%D0%A3%D0%BF%D1%80%D0%B0%D0%B2%D0%BB%D0%B5%D0%BD%D0%B8%D0%B5-%D1%81%D0%BB%D1%83%D0%B6%D0%B1%D0%BE%D0%B9-AD-DC.html">Управление службой AD DC</a></li>
+<li><a href="%D0%9F%D0%BE%D1%80%D1%82%D1%8B-AD-DC.html">Порты AD DC</a></li>
+<li><a href="Man-%D1%81%D1%82%D1%80%D0%B0%D0%BD%D0%B8%D1%86%D1%8B-Samba.html">Man страницы Samba</a></li>
+<li><a href="%D0%9E%D0%B1%D0%BD%D0%BE%D0%B2%D0%BB%D0%B5%D0%BD%D0%B8%D0%B5-Samba.html">Обновление Samba</a></li>
+</ul>
+</main>
+</body>
+</html>

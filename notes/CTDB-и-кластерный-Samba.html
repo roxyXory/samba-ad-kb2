@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CTDB и кластерный Samba</title>
+<link rel="stylesheet" href="../style.css">
+</head>
+<body>
+<nav><a href="../index.html">База знаний Samba AD DC</a></nav>
+<main><h1>CTDB и кластерный Samba</h1>
+<h2>Суть</h2>
+<p>CTDB — компонент кластерной базы данных в clustered Samba, который обеспечивает высокодоступный кластер CIFS-серверов с распределением нагрузки. В сочетании с кластерной файловой системой CTDB даёт полную среду высокой доступности (HA) для таких сервисов, как кластерный Samba, NFS и другие службы. Эта страница вики — обзорный хаб: она собирает ссылки на все разделы документации по CTDB (конфигурация, диагностика, разработка) и задаёт стартовую точку для построения кластера.</p>
+<h2>Ключевое</h2>
+<p><strong>Что делает CTDB</strong> (из раздела Introduction):</p>
+<ul>
+<li>предоставляет кластеризованную версию базы данных TDB с автоматическим перестроением/восстановлением баз при отказе узла;</li>
+<li>следит за узлами кластера и сервисами, запущенными на каждом узле;</li>
+<li>управляет пулом публичных IP-адресов, которые используются для предоставления сервисов клиентам; альтернативно CTDB может использоваться с LVS.</li>
+</ul>
+<p><strong>Поддерживаемые платформы</strong>: CTDB в первую очередь разрабатывается и тестируется на Linux; подмножество функций может работать на других платформах.</p>
+<p><strong>Получение и сборка</strong>: Samba и CTDB должны быть установлены на всех узлах кластера. CTDB является частью Samba (&gt;= 4.2.0), поэтому для получения CTDB нужно получить Samba. Отдельные разделы: «Getting and Building CTDB» (сборка из исходников) и «Upgrading a CTDB cluster» (обновление существующего кластера).</p>
+<p><strong>Настройка кластера с CTDB</strong> — основные темы документации:</p>
+<ul>
+<li>Basic CTDB configuration — базовая конфигурация CTDB;</li>
+<li>Setting up a cluster filesystem — настройка кластерной файловой системы;</li>
+<li>Configuring the CTDB recovery lock — настройка recovery lock;</li>
+<li>Adding public IP addresses — добавление публичных IP-адресов;</li>
+<li>Configuring clustered Samba — настройка кластерного Samba;</li>
+<li>Setting up CTDB for Clustered NFS — кластерный NFS поверх CTDB;</li>
+<li>Setting up CTDB with other services — CTDB с другими сервисами;</li>
+<li>Advanced CTDB configuration — расширенная конфигурация;</li>
+<li>отдельные сценарии: CTDB with GPFS, CTDB with GlusterFS, CTDB with GFS.</li>
+</ul>
+<p><strong>Диагностика проблем CTDB</strong>: раздел «Analysing CTDB problems» охватывает производительность CTDB (CTDB Performance), объединённые логи (Merged logs) и шаблоны поиска по файлу журнала CTDB (CTDB log file search patterns).</p>
+<p><strong>Разработка CTDB</strong>: описание дизайна базы данных CTDB (CTDB database design) и запуск тестов (Running CTDB tests).</p>
+<h2>Подводные камни</h2>
+<ul>
+<li>В разделе «Historical and Background Information» (CTDB Project, Clustered Samba, Samba &amp; Clustering и статьи Michael Adam о clustered NAS) вики прямо предупреждает: «Note that some of this information is out of date» — часть исторических материалов устарела, опираться на них следует с осторожностью.</li>
+<li>Кластер собирают из Unix domain members, а не из контроллеров домена: по странице «Rsync based SysVol replication workaround» CTDB, необходимый для кластерного Samba, несовместим с ролью Samba AD DC (обсуждение в контексте SysVol — <a href="%D0%A0%D0%B5%D0%BF%D0%BB%D0%B8%D0%BA%D0%B0%D1%86%D0%B8%D1%8F-SysVol.html">Репликация SysVol</a>; ввод члена домена — <a href="Samba-%D0%BA%D0%B0%D0%BA-%D1%87%D0%BB%D0%B5%D0%BD-%D0%B4%D0%BE%D0%BC%D0%B5%D0%BD%D0%B0.html">Samba как член домена</a>).</li>
+</ul>
+<h2>Связанные заметки</h2>
+<ul>
+<li><a href="Samba-%D0%BA%D0%B0%D0%BA-%D1%87%D0%BB%D0%B5%D0%BD-%D0%B4%D0%BE%D0%BC%D0%B5%D0%BD%D0%B0.html">Samba как член домена</a></li>
+<li><a href="%D0%A3%D0%BF%D1%80%D0%B0%D0%B2%D0%BB%D0%B5%D0%BD%D0%B8%D0%B5-%D1%81%D0%BB%D1%83%D0%B6%D0%B1%D0%BE%D0%B9-AD-DC.html">Управление службой AD DC</a></li>
+<li><a href="%D0%94%D0%B8%D0%B0%D0%B3%D0%BD%D0%BE%D1%81%D1%82%D0%B8%D0%BA%D0%B0-AD-DC.html">Диагностика AD DC</a></li>
+<li><a href="%D0%A3%D1%81%D1%82%D0%B0%D0%BD%D0%BE%D0%B2%D0%BA%D0%B0-Samba-AD-DC.html">Установка Samba AD DC</a></li>
+<li><a href="%D0%A0%D0%B5%D0%BF%D0%BB%D0%B8%D0%BA%D0%B0%D1%86%D0%B8%D1%8F-SysVol.html">Репликация SysVol</a></li>
+</ul>
+</main>
+</body>
+</html>

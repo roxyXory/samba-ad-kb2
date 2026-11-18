@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FAQ — Samba</title>
+<link rel="stylesheet" href="../style.css">
+</head>
+<body>
+<nav><a href="../index.html">База знаний Samba AD DC</a></nav>
+<main><h1>FAQ — Samba</h1>
+<h2>Суть</h2>
+<p>Официальная страница FAQ SambaWiki: собрание ответов на вопросы, которые часто задают в списке рассылки Samba. Она охватывает общие вопросы (сроки релизов, обновление, лимиты размеров баз TDB/LDB), работу Samba в роли AD DC (стабильность, схема, Kerberos, репликация, DNS, доверия, групповые политики, LDAP), а также короткие разделы про domain member, NT4-style PDC и standalone-сервер. Для большинства тем даны ссылки на отдельные статьи вики.</p>
+<h2>Ключевое</h2>
+<h3>Общие вопросы</h3>
+<ul>
+<li><strong>Когда выйдет следующая версия Samba?</strong> — сроки описаны на странице Samba Release Planning.</li>
+<li><strong>Помощь по неподдерживаемой версии</strong> — сначала обновитесь до поддерживаемой: минорные версии исправляют ошибки, мажорные добавляют функции. Если дистрибутивный Samba больше не поддерживается проектом — обращайтесь в поддержку дистрибутива.</li>
+<li><strong>Как обновить Samba</strong> — см. <a href="%D0%9E%D0%B1%D0%BD%D0%BE%D0%B2%D0%BB%D0%B5%D0%BD%D0%B8%D0%B5-Samba.html">Обновление Samba</a>.</li>
+<li><strong>Максимальный размер базы TDB/LDB</strong> — 4 ГБ, так как базы используют 32-битные структуры (проект NTDB, призванный снять лимит, остановлен). Для <code>sam.ldb</code> на AD DC на базе LMDB максимальный размер задаётся параметром <code>--backend-store-size=SIZE</code> команд <code>samba-tool domain provision</code> и <code>samba-tool domain join</code> (по умолчанию 8 ГБ); LMDB — настоящая 64-битная БД, предел ограничен только хранилищем.</li>
+</ul>
+<h3>Samba как AD DC</h3>
+<ul>
+<li><strong>Стабильность</strong>: Samba AD стабильна для production. Поддержка AD DC появилась в Samba 4.0 (декабрь 2012), но часть функций ещё не реализована — например, репликация Sysvol.</li>
+<li><strong>Какие Windows Server можно ввести в лес как DC</strong>: по таблице со страницы — Windows Server 2016: «Not supported»; Windows Server 2012 / 2012 R2: поддерживается в Samba &gt;=4.5; Windows Server 2008 / 2008 R2: поддерживается в Samba &gt;=4.0; Windows Server 2003 / 2003R2 и Windows 2000: «Not tested». Ограничивающий фактор — версия схемы AD (AD Schema Version Support).</li>
+<li><strong>Пустое «Сетевое окружение»</strong>: демон <code>smbd</code> AD DC не поддерживает browsing; сроков появления функции нет.</li>
+<li><strong>AD DC как файлсервер</strong>: не рекомендуется, но возможно; среди ограничений — нельзя получить домашний каталог и shell пользователя из AD, придётся использовать template-строки в <code>smb.conf</code>.</li>
+<li><strong>Параметр <code>server services</code></strong> задаётся при provisioning; если его нет в <code>[global]</code> — используются значения по умолчанию. Разрешённые ручные изменения: отключение спулера печати (<code>spoolss</code> → <code>-spoolss</code>) и смена DNS-бэкенда.</li>
+<li><strong>Гостевой доступ на AD DC</strong>: <code>map to guest = bad user</code> на AD DC не работает — параметр <code>guest account</code>, на котором он основан, в режиме AD не реализован.</li>
+<li><strong>Диапазон ID на DC</strong>: просто задайте пользователям <code>uidNumber</code> в нужном диапазоне, а группе Domain Users — <code>gidNumber</code> из того же диапазона.</li>
+<li><strong>Репликация</strong>: всё, что хранится внутри AD (пользователи, группы, DNS-записи), реплицируется между DC. DFS-R для репликации Sysvol не поддерживается (обход — см. Sysvol Replication (DFS-R)). Репликация с не-AD LDAP-серверами не поддерживается и не планируется.</li>
+<li><strong>Внутренний DNS</strong>: несколько DNS-forwarder'ов поддерживается с Samba 4.5 (см. Setting up a DNS Forwarder). Трансфер зон BIND на не-AD DNS-серверы не поддерживается — обновления зон идут только через репликацию каталога.</li>
+<li><strong>Доверия (trusts)</strong>: страница FAQ устарела (её правка — 20.10.2024). SID filtering действительно не применяется, и стороны должны доверять друг другу полностью, но запрет «нельзя добавлять пользователей и группы доверенного домена в группы домена» снят в 4.9 (foreignSecurityPrincipal создаются автоматически, членства раскрываются на границах доверия). Актуальная картина — <a href="%D0%94%D0%BE%D0%B2%D0%B5%D1%80%D0%B8%D1%82%D0%B5%D0%BB%D1%8C%D0%BD%D1%8B%D0%B5-%D0%BE%D1%82%D0%BD%D0%BE%D1%88%D0%B5%D0%BD%D0%B8%D1%8F-%D0%BC%D0%B5%D0%B6%D0%B4%D1%83-%D0%B4%D0%BE%D0%BC%D0%B5%D0%BD%D0%B0%D0%BC%D0%B8.html">Доверительные отношения между доменами</a>.</li>
+<li><strong>Парольные политики</strong>: Samba не применяет ограничения из GPO, а лишь раздаёт GPO клиентам через share Sysvol. Доменные политики задаются командой <code>samba-tool domain passwordsettings</code>.</li>
+<li><strong>OpenLDAP как бэкенд AD DC</strong>: не поддерживается, активной работы нет (проблемы: метаданные DRS-репликации и dirsync, манипуляция схемой, транзакции, ACL). Команда Samba не рассматривает это как направление разработки.</li>
+<li><strong>Анонимные LDAP-поиски</strong>: Samba учитывает флаг dSHeuristics (см. http://support.microsoft.com/kb/326690), но включать анонимный доступ не рекомендуется — настройте LDAP-аутентификацию или Kerberos в клиенте.</li>
+</ul>
+<h3>Ошибки и их устранение</h3>
+<ul>
+<li><code>Warning: No NC replicated for Connection!</code> в выводе <code>samba-tool drs showrepl</code> — Samba неверно выставляет флаги при регистрации DC на репликацию; предупреждение безвредно и игнорируется.</li>
+<li><code>UpdateRefs failed with WERR_DS_DRA_BAD_NC/NT code 0xc00020f8 ...</code> при первом запуске Samba DC в существующем лесу Windows AD — ошибку пишет KCC, пока Windows DC не установит соединения с Samba DC. Исправление — на Windows DC:</li>
+</ul>
+<pre><code>C:\&gt; repadmin /kcc
+</code></pre>
+<p>либо на Samba DC:</p>
+<pre><code># samba-tool drs kcc -Uadministrator Windows_DC.samdom.example.com
+</code></pre>
+<ul>
+<li>Сообщение GPMC «The permissions for this GPO in the SYSVOL folder are inconsistent with those in Active Directory» — шаги устранения на странице Sysvolreset.</li>
+<li><code>User Administrator in your existing directory has SID ..., expected it to be ...-500</code> при классическом (NT4) апгрейде: RID администратора домена не равен 500. Исправление — удалить учётку (будет пересоздана при апгрейде) или вручную сменить RID на 500, перепроверив ACL и приложения, ссылающиеся на этого администратора.</li>
+</ul>
+<h3>Samba как domain member</h3>
+<ul>
+<li><strong><code>samba-tool domain provision</code> для члена домена не используется</strong>: из ролей, которые предлагает <code>samba-tool domain provision --help</code>, поддерживается только DC. Если создали другую роль — удалите все базы Samba и сгенерированный <code>smb.conf</code> и вводите машину командой <code>net</code> (см. <a href="Samba-%D0%BA%D0%B0%D0%BA-%D1%87%D0%BB%D0%B5%D0%BD-%D0%B4%D0%BE%D0%BC%D0%B5%D0%BD%D0%B0.html">Samba как член домена</a>).</li>
+<li><strong><code>getent passwd</code>/<code>getent group</code> не показывают пользователей</strong> при бэкенде idmap_ad: winbind по умолчанию больше не перечисляет пользователей и группы — запрашивайте явно (<code>getent passwd auser</code>, компьютеры — <code>getent passwd SAMDOM\hostname$</code>). Для просмотра всех записей (только для тестирования) добавьте в <code>smb.conf</code>:</li>
+</ul>
+<pre><code>   winbind enumerate users = yes
+   winbind enumerate groups = yes
+</code></pre>
+<p>Если записей всё ещё нет, проверьте: у пользователей <code>uidNumber</code> внутри диапазона из <code>smb.conf</code> (пример со страницы: <code>idmap config DOMAIN : range = 10000-999999</code>), у группы Domain Users есть <code>gidNumber</code> из того же диапазона (иначе все пользователи игнорируются), у компьютеров при необходимости свой <code>uidNumber</code>; корректность <code>libnss_winbind</code>; строки <code>passwd</code> и <code>group</code> с <code>winbind</code> в <code>/etc/nsswitch.conf</code>.</p>
+<h3>Samba как NT4 PDC и standalone</h3>
+<ul>
+<li><strong>Мигрировать NT4-домен в AD не обязательно</strong>: «Samba 4» — это не «только AD»; классическая (NT4-style) поддержка PDC сохраняется во всех новых версиях, обновляйте Samba 3.x PDC как раньше.</li>
+<li><strong>SMB2/SMB3 не имеют сетевого просмотра</strong>: browsing заменён на Network Discovery (WSD/LLMNR), который Samba пока не поддерживает. Ресурсы доступны напрямую по <code>\\name</code> или <code>\\ip.address</code>. Если на Windows включён SMB1 — проверьте NetBIOS over TCP/IP и что запущен <code>nmbd</code>.</li>
+<li><strong>Локальное подключение пользователя</strong>: пользователь должен существовать в <code>/etc/passwd</code> и быть добавлен в локальный <code>smbpasswd</code>:</li>
+</ul>
+<pre><code># smbpasswd -a username
+</code></pre>
+<p>Для гостевого подключения нужен <code>map to guest = bad user</code> в <code>[global]</code>, а гостевой пользователь (по умолчанию <code>guest user = nobody</code>) должен существовать в системном файле паролей.</p>
+<h2>Подводные камни</h2>
+<ul>
+<li>Удаление или изменение опций <code>server services</code> может привести к некорректной работе AD DC — вручную меняют только <code>-spoolss</code> и DNS-бэкенд.</li>
+<li>Не добавляйте в <code>smb.conf</code> AD DC строки <code>idmap_ad</code> из конфигурации domain member: они не дадут эффекта и могут привести к проблемам.</li>
+<li>Windows Server 2016 как дополнительный DC в лесу с Samba DC не поддерживается (по таблице FAQ).</li>
+<li>Репликация Sysvol (DFS-R) не поддерживается — при нескольких DC Sysvol придётся синхронизировать обходным путём.</li>
+<li>Доверия (trusts): FAQ называет их экспериментальными и запрещает добавлять пользователей/группы доверенного домена в группы своего домена — второе неверно с 4.9 (про SID filtering — верно). См. <a href="%D0%94%D0%BE%D0%B2%D0%B5%D1%80%D0%B8%D1%82%D0%B5%D0%BB%D1%8C%D0%BD%D1%8B%D0%B5-%D0%BE%D1%82%D0%BD%D0%BE%D1%88%D0%B5%D0%BD%D0%B8%D1%8F-%D0%BC%D0%B5%D0%B6%D0%B4%D1%83-%D0%B4%D0%BE%D0%BC%D0%B5%D0%BD%D0%B0%D0%BC%D0%B8.html">Доверительные отношения между доменами</a>.</li>
+<li>Не используйте TLD <code>.local</code> для зоны AD DNS — не рекомендуется (см. Using an Invalid TLD).</li>
+<li>AD DC как файлсервер не рекомендуется; гостевой доступ на AD DC не реализован (параметр <code>guest account</code> отсутствует в режиме AD).</li>
+<li>Строки <code>winbind enumerate users/groups = yes</code> добавляйте только для тестирования.</li>
+<li>Включение анонимного доступа к AD через LDAP создаёт проблемы безопасности и не рекомендуется.</li>
+<li>Изменение RID администратора (на 500) делает его другим аккаунтом (идентификация по objectSID) — придётся переписать приложения и ACL, где он указан.</li>
+</ul>
+<h2>Связанные заметки</h2>
+<ul>
+<li><a href="%D0%9E%D0%B1%D0%BD%D0%BE%D0%B2%D0%BB%D0%B5%D0%BD%D0%B8%D0%B5-Samba.html">Обновление Samba</a></li>
+<li><a href="Samba-%D0%BA%D0%B0%D0%BA-%D1%87%D0%BB%D0%B5%D0%BD-%D0%B4%D0%BE%D0%BC%D0%B5%D0%BD%D0%B0.html">Samba как член домена</a></li>
+<li><a href="%D0%92%D0%BD%D1%83%D1%82%D1%80%D0%B5%D0%BD%D0%BD%D0%B8%D0%B9-DNS-%D0%B1%D1%8D%D0%BA%D0%B5%D0%BD%D0%B4.html">Внутренний DNS бэкенд</a></li>
+<li><a href="%D0%94%D0%B8%D0%B0%D0%B3%D0%BD%D0%BE%D1%81%D1%82%D0%B8%D0%BA%D0%B0-AD-DC.html">Диагностика AD DC</a></li>
+<li><a href="%D0%94%D0%BE%D0%B2%D0%B5%D1%80%D0%B8%D1%82%D0%B5%D0%BB%D1%8C%D0%BD%D1%8B%D0%B5-%D0%BE%D1%82%D0%BD%D0%BE%D1%88%D0%B5%D0%BD%D0%B8%D1%8F-%D0%BC%D0%B5%D0%B6%D0%B4%D1%83-%D0%B4%D0%BE%D0%BC%D0%B5%D0%BD%D0%B0%D0%BC%D0%B8.html">Доверительные отношения между доменами</a></li>
+<li><a href="%D0%98%D0%BC%D0%B5%D0%BD%D0%BE%D0%B2%D0%B0%D0%BD%D0%B8%D0%B5-%D0%B4%D0%BE%D0%BC%D0%B5%D0%BD%D0%B0-FAQ.html">Именование домена FAQ</a></li>
+</ul>
+</main>
+</body>
+</html>

@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Man-страницы Samba</title>
+<link rel="stylesheet" href="../style.css">
+</head>
+<body>
+<nav><a href="../index.html">База знаний Samba AD DC</a></nav>
+<main><h1>Man-страницы Samba</h1>
+<h2>Суть</h2>
+<p>Страница «Manpages» вики Samba — это указатель онлайн-man-документации Samba: справочника по всем параметрам <code>smb.conf</code> и утилитам проекта. Сама страница документации не содержит, а даёт ровно две внешние ссылки — man-страницы разрабатываемой версии (<code>master</code>) и man-страницы текущей выпущенной версии. Это точка входа, когда нужно проверить точное имя параметра или опции командной строки.</p>
+<h2>Ключевое</h2>
+<p>Заголовок страницы: <strong>«Online <code>man</code> documentation for Samba»</strong>. Содержимое — две ссылки:</p>
+<table>
+<thead>
+<tr>
+<th>Раздел</th>
+<th>Адрес</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Man-страницы текущей разрабатываемой версии (<code>master</code>)</td>
+<td>https://samba-team.gitlab.io/samba/htmldocs/manpages/</td>
+</tr>
+<tr>
+<td>Man-страницы текущей выпущенной (released) версии</td>
+<td>https://www.samba.org/samba/docs/man/</td>
+</tr>
+</tbody>
+</table>
+<p>Как пользоваться указателем:</p>
+<ol>
+<li>Для администратора с установленным стабильным Samba актуальнее второй раздел — man-страницы выпущенной версии (<code>www.samba.org/samba/docs/man/</code>): параметры и опции совпадают с тем, что установлено.</li>
+<li>Для проверки новых параметров и разработки — первый раздел, man-страницы ветки <code>master</code> (<code>samba-team.gitlab.io/samba/htmldocs/manpages/</code>): там отражаются изменения, ещё не попавшие в релиз.</li>
+</ol>
+<p>Метаданные страницы: последняя правка — 28 апреля 2021; содержимое доступно по лицензии CC-BY (если не указано иное).</p>
+<p>Проверка доступности ссылок (2026-10-07 и повторно 2026-10-08, <code>curl</code>): зеркало man-страниц ветки master <code>https://samba-team.gitlab.io/samba/htmldocs/manpages/</code> отвечало <code>200</code> в оба дня; <code>https://www.samba.org/samba/docs/man/</code> 2026-10-07 не ответил (504, затем тайм-аут), тогда как 2026-10-08 <code>https://www.samba.org/</code> ответил <code>200</code> — сайт samba.org периодически медленно отвечает, при тайм-ауте стоит пробовать позже.</p>
+<h2>Связанные заметки</h2>
+<ul>
+<li><a href="%D0%9F%D0%BE%D0%BB%D1%8C%D0%B7%D0%BE%D0%B2%D0%B0%D1%82%D0%B5%D0%BB%D1%8C%D1%81%D0%BA%D0%B0%D1%8F-%D0%B4%D0%BE%D0%BA%D1%83%D0%BC%D0%B5%D0%BD%D1%82%D0%B0%D1%86%D0%B8%D1%8F.html">Пользовательская документация</a></li>
+<li><a href="%D0%94%D0%BE%D0%BA%D1%83%D0%BC%D0%B5%D0%BD%D1%82%D0%B0%D1%86%D0%B8%D1%8F-%D1%80%D0%B0%D0%B7%D1%80%D0%B0%D0%B1%D0%BE%D1%82%D1%87%D0%B8%D0%BA%D0%B0.html">Документация разработчика</a></li>
+<li><a href="FAQ-Samba.html">FAQ Samba</a></li>
+<li><a href="%D0%93%D0%BB%D0%B0%D0%B2%D0%BD%D0%B0%D1%8F-Samba-Wiki.html">Главная Samba Wiki</a></li>
+</ul>
+</main>
+</body>
+</html>

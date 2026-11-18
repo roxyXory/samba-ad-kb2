@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Доверительные отношения между доменами Samba AD</title>
+<link rel="stylesheet" href="../style.css">
+</head>
+<body>
+<nav><a href="../index.html">База знаний Samba AD DC</a></nav>
+<main><h1>Доверительные отношения между доменами Samba AD</h1>
+<h2>Суть</h2>
+<p>Доверие (trust) — это отношение между двумя доменами, при котором пользователь одного домена аутентифицируется в другом. В Samba поддержка доверий реализована для роли AD DC: external-доверия между отдельными доменами и транзитивные forest-доверия (для корневых доменов лесов) работают в обе стороны — inbound и outbound. Управляют довериями подкоманды <code>samba-tool domain trust</code> (появились в 4.3, существенно развиты в 4.9). Правила SID filtering Samba не применяет, а в 4.9 добавлена возможность включать пользователей и группы доверенного домена в группы локального домена, поэтому старые формулировки FAQ («нельзя добавить пользователей и группы доверенного домена в группы») устарели.</p>
+<h2>Ключевое</h2>
+<h3>Что реально работает</h3>
+<ul>
+<li>«External trusts between individual domains work in both ways (inbound and outbound). The same applies to root domains of a forest trust.» — external-доверия между отдельными доменами и forest-доверия корневых доменов лесов работают в обе стороны (страница Active Directory Trusts вики Samba, последняя правка 22.02.2025).</li>
+<li>4.3: транзитная маршрутизация в другой лес (transitive routing into the other forest) «is fully functional for kerberos, but not yet supported for NTLMSSP» — для Kerberos полностью, для NTLMSSP ещё нет.</li>
+<li>4.9: «External domain trusts, as well a transitive forest trusts, are supported in both directions (inbound and outbound) for Kerberos and NTLM authentication.» — оба типа доверий работают в обе стороны и для Kerberos, и для NTLM.</li>
+<li>Ограничение 4.9: «Samba can still only operate in a forest with just one single domain» — Samba по-прежнему работает только в лесу из одного домена (release notes 4.9.0; в более новых release notes уточнений по этому пункту не нашлось).</li>
+</ul>
+<h3>Подкоманды samba-tool domain trust</h3>
+<p>Man-страница <code>samba-tool(8)</code> (актуальная версия) перечисляет подкоманды так; в man-странице 4.9 тот же список, но без <code>modify</code>:</p>
+<pre><code>domain trust create DOMAIN options [options]
+    Create a domain or forest trust.
+domain trust modify DOMAIN options [options]
+    Modify a domain or forest trust.
+domain trust delete DOMAIN options [options]
+    Delete a domain trust.
+domain trust list options [options]
+    List domain trusts.
+domain trust namespaces [ DOMAIN ] options [options]
+    Manage forest trust namespaces.
+domain trust show DOMAIN options [options]
+    Show trusted domain details.
+domain trust validate DOMAIN options [options]
+    Validate a domain trust.
+</code></pre>
+<p>Что появилось когда (по исходникам и release notes):</p>
+<ul>
+<li>4.3.0: «samba-tool got &quot;domain trust&quot; subcommands to manage trusts: create / delete / list / namespaces / show / validate» — подкоманды <code>create</code>, <code>delete</code>, <code>list</code>, <code>namespaces</code>, <code>show</code>, <code>validate</code>. Подкоманды <code>modify</code> в 4.3.0 и 4.9.0 нет (проверено по исходникам обеих версий); она упоминается как «newly added» в security-релизах 4.15.13 / 4.16.8 / 4.17.4 по CVE-2022-37966 (ноябрь 2022).</li>
+<li>Все trust-опции 4.3 и текущего master совпадают, кроме добавленных позже к <code>modify</code> — <code>--use-aes-keys</code> и <code>--raw-kerb-enctypes</code>.</li>
+<li>Проверено на месте (<code>samba-tool domain trust &lt;subcommand&gt; --help</code>, Samba 4.22.11-Debian): в 4.22 доступны все семь подкоманд, включая <code>modify</code>.</li>
+</ul>
+<h3>create: опции и поведение</h3>
+<p>Справка <code>samba-tool domain trust create --help</code> (4.22.11; формулировки идентичны исходнику master):</p>
+<pre><code>--type=TYPE           The type of the trust: 'external' or 'forest'.
+--direction=DIRECTION The trust direction: 'incoming', 'outgoing' or 'both'.
+--create-location=LOCATION
+                      Where to create the trusted domain object: 'local' or 'both'.
+--cross-organisation  The related domains does not belong to the same organisation.
+--quarantined=yes|no  Special SID filtering rules are applied to the trust.
+                      With --type=external the default is yes. With --type=forest the default is no.
+--not-transitive      The forest trust is not transitive.
+--treat-as-external   The treat the forest trust as external.
+--no-aes-keys         The trust does not use AES kerberos keys.
+--skip-validation     Skip validation of the trust.
+</code></pre>
+<p>Детали из исходника (<code>python/samba/netcmd/domain/trust.py</code>, master):</p>
+<ul>
+<li>Значения по умолчанию: <code>--type=external</code>, <code>--direction=both</code>, <code>--create-location=both</code>.</li>
+<li><code>--not-transitive</code> и <code>--treat-as-external</code> допустимы только с <code>--type=forest</code>; иначе команда завершается ошибкой «--not-transitive requires --type=forest» / «--treat-as-external requires --type=forest».</li>
+<li><code>--quarantined</code> не задан: при <code>--type=external</code> карантин включается (в атрибуты TDO пишется <code>LSA_TRUST_ATTRIBUTE_QUARANTINED_DOMAIN</code>), при <code>--type=forest</code> — нет.</li>
+<li><code>--create-location=both</code> (по умолчанию): объекты доверия (TDO) создаются на обеих сторонах; пароль доверия не запрашивается — каждая сторона получает случайный секрет 240 байт; нужны учётные данные администратора второго домена (группа Credentials Options: <code>-U</code>, <code>--password</code>, <code>-W</code>).</li>
+<li><code>--create-location=local</code>: создаётся только локальный TDO; интерактивно запрашиваются пароли «New Incoming Trust Password» / «New Outgoing Trust Password» (с подтверждением, при несовпадении — «Sorry, passwords do not match.»), и тот же пароль нужно задать на другой стороне.</li>
+<li>Локальный DC берётся через ncalrpc (нужна роль AD DC); параметры <code>--local-dc-*</code> позволяют обратиться к удалённому/чужому DC, включая Windows (CVE-2022-37966).</li>
+<li>Имена второго домена берутся с его DC (<code>LocalDomain Netbios[...] DNS[...] SID[...]</code>, <code>RemoteDomain Netbios[...] DNS[...] SID[...]</code>), удалённый DC ищется через <code>Net.finddc()</code> (<code>NBT_SERVER_LDAP|DS|WRITABLE|PDC</code>), при неудаче — «Failed to find a writeable DC for domain '%s'».</li>
+<li>Если доверие уже существует: «TrustedDomain %s already exist'». При сбое создания в режиме <code>both</code> выполняется откат: «Deleting remote TDO.» / «Deleting local TDO.».</li>
+<li>Если validation не отключена (<code>--skip-validation</code>), команда сама проверяет доверие: «Validating outgoing trust...», «Validating incoming trust...», затем строки вида <code>OK: LocalValidation: DC[...] CONNECTION[...] TRUST[...]</code> (при <code>VERIFY_STATUS_RETURNED</code> добавляется <code>VERIFY_STATUS_RETURNED</code>) и в конце <code>Success.</code></li>
+</ul>
+<h3>modify / delete / list / show / validate / namespaces</h3>
+<ul>
+<li><code>modify</code>: <code>--use-aes-keys</code>, <code>--no-aes-keys</code>, <code>--raw-kerb-enctypes=KERB_ENCTYPES</code> (взаимоисключающие) — меняет типы шифрования Kerberos у существующего доверия, печатает <code>Old kerb_EncTypes:</code> / <code>New kerb_EncTypes:</code> (или <code>No kerb_EncTypes update needed</code>).</li>
+<li><code>delete</code>: <code>--delete-location=local|both</code> (по умолчанию <code>both</code>; в режиме <code>both</code> нужны учётные данные удалённой стороны).</li>
+<li><code>list</code>: собственных опций нет; печатает строки вида <code>Type[...] Transitive[...] Direction[...] Name[...]</code>.</li>
+<li><code>show</code>: собственных опций нет; печатает <code>NetbiosName</code>, <code>DnsName</code>, <code>SID</code>, <code>Type</code>, <code>Direction</code>, <code>Attributes</code>, <code>PosixOffset</code>, <code>kerb_EncTypes</code>, а для forest-доверия — ещё и пространства имён леса.</li>
+<li><code>validate</code>: <code>--validate-location=local|both</code> (по умолчанию <code>both</code>); выполняет netlogon-вызовы <code>NETLOGON_CONTROL_TC_VERIFY</code> (печатает <code>OK: LocalValidation: DC[...] CONNECTION[...] TRUST[...]</code>) и <code>NETLOGON_CONTROL_REDISCOVER</code> (<code>OK: LocalRediscover: DC[...] CONNECTION[...]</code>), при <code>both</code> — то же для удалённой стороны (<code>RemoteValidation</code>, <code>RemoteRediscover</code>).</li>
+<li><code>namespaces</code>: <code>--refresh=check|store</code>, <code>--enable-all</code>, <code>--enable-tln</code>/<code>--disable-tln</code> (DNSDOMAIN), <code>--add-tln-ex</code>/<code>--delete-tln-ex</code>, <code>--enable-nb</code>/<code>--disable-nb</code>, <code>--enable-sid</code>/<code>--disable-sid</code>, <code>--add-upn-suffix</code>/<code>--delete-upn-suffix</code>, <code>--add-spn-suffix</code>/<code>--delete-spn-suffix</code>. Часть операций требует аргумент <code>DOMAIN</code> (иначе ошибки вида «--refresh=store not allowed without DOMAIN»). Набор опций совпадает в 4.3 и в текущем master.</li>
+</ul>
+<h3>Последовательность настройки обеих сторон</h3>
+<ol>
+<li>Уникальные NetBIOS-имена. Имя NetBIOS по умолчанию (первые 15 символов левой части DNS-имени, для <code>ad.example.com</code> — <code>AD</code>) выбирать не стоит: «Selecting such a NetBIOS domain name would be a bad idea, as it would be quite likely to conflict with any other domains that had the same NetBIOS name. This would pose an issue if you ever had to set up a trust relationship between these two domains.» (Active Directory Naming FAQ). Команды надёжности оперируют NetBIOS-именами обеих сторон (<code>Netbios[...]</code> в выводе create, <code>netbios_name</code> в TDO).</li>
+<li>Разрешение имён второго домена. Перед созданием доверия локальный DC ищет DC второго домена по имени домена через <code>Net.finddc()</code> (<code>setup_remote_server</code> в <code>trust.py</code>) — значит имена второго домена должны разрешаться. Внутренний DNS-сервер Samba условные форвардеры не умеет: «Conditional forwarders are not implemented yet. The same error message as above is returned» и «The DNS forwarder can only be changed in the smb.conf, not via the MMC Snap-In» (вики, DNS Administration; правка страницы 25.04.2023). Доступный во внутреннем DNS механизм — только глобальный список серверов <code>dns forwarder</code> в <code>smb.conf</code> (smb.conf(5): «This option specifies the list of DNS servers that DNS requests will be forwarded to if they can not be handled by Samba itself. The DNS forwarder is only used if the internal DNS server in Samba is used.», пример <code>dns forwarder = 192.168.0.1 192.168.0.2</code>). Альтернативный вариант — бэкенд BIND9_DLZ: DNS обслуживает BIND, файлы вида <code>named.conf</code> формируются Samba (см. <a href="BIND9-DLZ-DNS-%D0%B1%D1%8D%D0%BA%D0%B5%D0%BD%D0%B4.html">BIND9 DLZ DNS бэкенд</a>), и задачу разрешения имён второго домена приходится решать средствами DNS самостоятельно. Дополнительно нужны открытые порты AD DC между доменами (<a href="%D0%9F%D0%BE%D1%80%D1%82%D1%8B-AD-DC.html">Порты AD DC</a>).</li>
+<li>Учётные данные администратора второго домена — для режима <code>--create-location=both</code> (по умолчанию); свой DC при этом не требует учётных данных (ncalrpc, роль AD DC).</li>
+<li>Пароль доверия. <code>both</code> — пароль не вводится, стороны получают случайные 240-байтовые секреты; <code>local</code> — пароль вводится интерактивно и должен быть одинаковым с другой стороны, где доверие заводят отдельно.</li>
+<li>Проверка. <code>create</code> сам выполняет validation (см. выше), отдельно — <code>samba-tool domain trust validate DOMAIN</code> (TC_VERIFY + REDISCOVER, по умолчанию для обеих сторон), плюс инвентаризация через <code>list</code>/<code>show</code>.</li>
+<li>Управление. <code>modify</code> (типы шифрования), <code>delete</code> (<code>--delete-location</code>), <code>namespaces</code> (пространства имён леса).</li>
+</ol>
+<h3>Ограничения и безопасность</h3>
+<ul>
+<li>Актуальные ограничения со страницы вики (правка 22.02.2025): «Both sides of the trust need to fully trust each other!»; «No SID filtering rules are applied at all!»; «This means DCs of domain A can grant domain admin rights in domain B.»</li>
+<li>4.9: дополнительно «Selective (CROSS_ORGANIZATION) authentication is not supported. It's possible to create such a trust, but the KDC and winbindd ignore them.» — несмотря на наличие флага <code>--cross-organisation</code>, в Samba он не поддержан.</li>
+<li>AES-ключи доверий. CVE-2022-37966 (релизы 4.15.13, 4.16.8, 4.17.4): «the fallback for an unspecified msDS-SupportedEncryptionTypes ... for trustedDomain objects are changed in an incompatible way! The fallback is now aes256-cts-hmac-sha1-96 instead of rc4-hmac! It is therefor recommended to explicitly set the value on both sides of the trust before or immediately after the update». Рекомендации оттуда же: явно включать AES256 на обеих сторонах через GUI или <code>samba-tool domain trust modify --use-aes-keys</code>; для legacy-доверий к Windows 2000/2003 — принудительно RC4 через <code>samba-tool domain trust modify --no-aes-keys</code>; к удалённым (в том числе Windows) DC можно обращаться опциями <code>--local-dc-ipaddress=</code> и другими <code>--local-dc-*</code>; уже закэшированные cross-realm-билеты RC4 после перехода на AES могут перестать работать, снизить проблемы помогает сокращение времени жизни билета до 1 часа.</li>
+<li>Как записать это в конфигурации — важная тонкость. В <code>smb.conf</code> опция пишется <strong>через пробел</strong>: <code>kdc:user ticket lifetime = 1</code> (аналогично <code>kdc:service ticket lifetime</code> и <code>kdc:renewal lifetime</code>) — именно такое имя параметрической опции запрашивает KDC: <code>lpcfg_parm_long(lp_ctx, NULL, &quot;kdc&quot;, &quot;user ticket lifetime&quot;, 10)</code> в <code>lib/param/util.c</code>. Форма с подчёркиванием <code>kdc:user_ticket_lifetime</code> — это ключ GPO-хранилища <code>gpo.tdb</code>, куда значение кладёт <code>samba-gpupdate</code> из Kerberos-политики GPO (<code>python/samba/gp/gp_sec_ext.py</code>, <code>apply_map</code>). При старте KDC сначала читает <code>gpo.tdb</code> и только потом берёт параметрическую опцию из <code>smb.conf</code> (<code>lpcfg_default_kdc_policy</code>). Проверено по исходникам master и 4.22.11; сама рекомендация 1 часа — из advisory CVE-2022-37966.</li>
+<li>Ограничение объёма доверия на стороне winbind: <code>winbind:ignore domains = DOMAIN1, DOMAIN2</code> — «Allows one to enter a list of trusted domains winbind should ignore (untrust). This can avoid the overhead of resources from attempting to login to DCs that should not be communicated with.» (smb.conf(5)).</li>
+<li>Мониторинг: <code>samba-tool domain trust list</code> и <code>show</code> дают тип/направление/транзитивность доверия и выставленные <code>kerb_EncTypes</code>; <code>validate</code> проверяет работоспособность канала netlogon в обе стороны — это можно использовать как регулярную проверку.</li>
+<li>Доверие — полное взаимное: раз администраторы второго домена получают те же права, доверие стоит заводить только между доменами одного владельца/уровня доверия.</li>
+</ul>
+<h2>Подводные камни</h2>
+<ul>
+<li>Вики-FAQ (страница FAQ, правка 20.10.2024) до сих пор утверждает: «The trust feature is experimental and has several limitations, such as: SID filtering rules are not applied / You cannot add users and groups of a trusted domain into domain groups.» Пункт про группы неверен начиная с 4.9: «It's now possible to add users/groups of a trusted domain into domain groups. The group memberships are expanded on trust boundaries.», «foreignSecurityPrincipal objects (FPO) are now automatically created when members (as SID) of a trusted domain/forest are added to a group», «The 'samba-tool group *members' commands allow members to be specified as foreign SIDs.» Пункт про SID filtering на странице Active Directory Trusts подтверждается и в 2025 году.</li>
+<li>Справка <code>--no-aes-keys</code> в 4.3 и 4.9 была сформулирована наоборот: «The trust uses aes kerberos keys.» (хотя флаг означает отказ от AES); в текущих версиях текст исправлен на «The trust does not use AES kerberos keys.». Само поведение тоже менялось: в 4.9 при <code>--no-aes-keys</code> типы шифрования вообще не записывались (<code>enc_types = None</code>), а в master явно записывается RC4 (комментарий в коде: «CVE-2022-37966: Trust objects are no longer assumed to support RC4, so we must indicate support explicitly.»).</li>
+<li>Изменение умолчания AES (CVE-2022-37966) ломает доверия с неявно заданными типами шифрования — значения надо явно выставить на обеих сторонах до/сразу после обновления.</li>
+<li><code>--not-transitive</code> и <code>--treat-as-external</code> без <code>--type=forest</code> — ошибка; <code>--cross-organisation</code> создаёт доверие, но selective authentication всё равно не работает.</li>
+<li>Доверие «в одну сторону» не заработает: обе стороны должны полностью доверять друг другу (вики), поэтому недостаточно создать TDO только на своей стороне.</li>
+<li>Внутренний DNS Samba не поддерживает условные форвардеры (страница DNS Administration) — под trust придётся планировать DNS-пересылку заранее (глобальный <code>dns forwarder</code> или внешний/BIND9_DLZ).</li>
+<li>Подкоманда <code>modify</code> есть не во всех версиях, где есть остальные trust-команды: в 4.3/4.9 её нет, в справочниках этих версий ориентироваться на неё нельзя.</li>
+</ul>
+<h2>Источники</h2>
+<ul>
+<li>https://wiki.samba.org/index.php/Active_Directory_Trusts — основная страница вики: что работает (external и forest-доверия в обе стороны) и текущие ограничения (взаимное доверие, отсутствие SID filtering).</li>
+<li>https://wiki.samba.org/index.php/FAQ — устаревшая формулировка про «экспериментальность» и невозможность добавлять пользователей/группы доверенного домена в группы (страница правилась 20.10.2024).</li>
+<li>https://wiki.samba.org/index.php/Active_Directory_Naming_FAQ — конфликт NetBIOS-имён и проблемы при создании доверия.</li>
+<li>https://wiki.samba.org/index.php/DNS_Administration — условные форвардеры во внутреннем DNS не реализованы; форвардер задаётся только в smb.conf.</li>
+<li>https://www.samba.org/samba/docs/current/man-html/samba-tool.8.html — список и описания подкоманд <code>domain trust</code>.</li>
+<li>https://www.samba.org/samba/docs/4.9/man-html/samba-tool.8.html — man-страница 4.9: подкоманды те же, но без <code>modify</code>.</li>
+<li>https://www.samba.org/samba/docs/current/man-html/smb.conf.5.html — параметры <code>dns forwarder</code> и <code>winbind:ignore domains</code> (текст сверен локально со <code>smb.conf(5)</code> Samba 4.22.11 в Debian).</li>
+<li>https://www.samba.org/samba/history/samba-4.3.0.html — появление подкоманд <code>samba-tool domain trust</code>, работа транзитивной маршрутизации для Kerberos (NTLMSSP — нет), список ограничений.</li>
+<li>https://www.samba.org/samba/history/samba-4.9.0.html — доверия для Kerberos и NTLM в обе стороны, добавление пользователей/групп доверенного домена в группы, автоматические foreignSecurityPrincipal, ограничения (в т. ч. CROSS_ORGANIZATION и лес из одного домена).</li>
+<li>https://www.samba.org/samba/security/CVE-2022-37966.html — AES-ключи доверий, <code>samba-tool domain trust modify --use-aes-keys</code> / <code>--no-aes-keys</code>, <code>--local-dc-*</code>, изменение умолчания rc4→aes256.</li>
+<li>https://gitlab.com/samba-team/samba/-/blob/master/python/samba/netcmd/domain/trust.py — исходник команд master: опции, значения по умолчанию, тексты сообщений, логика create/validate.</li>
+<li>https://git.samba.org/?p=samba.git;a=blob_plain;f=python/samba/netcmd/domain.py;hb=samba-4.3.0 и ...;hb=samba-4.9.0 — исторические версии кода (в 4.3/4.9 команды жили в <code>domain.py</code>): состав подкоманд и опций, поведение <code>--no-aes-keys</code>.</li>
+<li>Проверки на месте: <code>samba-tool --version</code> (4.22.11-Debian), <code>samba-tool domain trust --help</code> и <code>--help</code> каждой подкоманды, <code>man -P cat smb.conf</code> — сверены списки подкоманд, формулировки опций и параметры smb.conf.</li>
+<li>https://gitlab.com/samba-team/samba/-/blob/master/lib/param/util.c — <code>lpcfg_default_kdc_policy()</code>: сначала чтение ключей <code>kdc:..._ticket_lifetime</code> из <code>gpo.tdb</code>, затем fallback через <code>lpcfg_parm_long(..., &quot;kdc&quot;, &quot;&lt;name&gt; ticket lifetime&quot;, ...)</code> (форма с пробелами — для smb.conf); https://gitlab.com/samba-team/samba/-/blob/master/python/samba/gp/gp_sec_ext.py — <code>apply_map</code> с ключами GPO-хранилища (<code>kdc:user_ticket_lifetime</code> и др.). Сверено также с исходником Samba 4.22.11.</li>
+</ul>
+<h2>Связанные заметки</h2>
+<ul>
+<li><a href="FAQ-Samba.html">FAQ Samba</a></li>
+<li><a href="%D0%98%D0%BC%D0%B5%D0%BD%D0%BE%D0%B2%D0%B0%D0%BD%D0%B8%D0%B5-%D0%B4%D0%BE%D0%BC%D0%B5%D0%BD%D0%B0-FAQ.html">Именование домена FAQ</a></li>
+<li><a href="%D0%9F%D0%BE%D1%80%D1%82%D1%8B-AD-DC.html">Порты AD DC</a></li>
+<li><a href="BIND9-DLZ-DNS-%D0%B1%D1%8D%D0%BA%D0%B5%D0%BD%D0%B4.html">BIND9 DLZ DNS бэкенд</a></li>
+<li><a href="%D0%A5%D0%B0%D1%80%D0%B4%D0%B5%D0%BD%D0%B8%D0%BD%D0%B3-Samba-AD-DC.html">Харденинг Samba AD DC</a></li>
+</ul>
+</main>
+</body>
+</html>

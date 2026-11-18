@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Настройка общего ресурса с использованием Windows ACL</title>
+<link rel="stylesheet" href="../style.css">
+</head>
+<body>
+<nav><a href="../index.html">База знаний Samba AD DC</a></nav>
+<main><h1>Настройка общего ресурса с использованием Windows ACL</h1>
+<h2>Суть</h2>
+<p>Расширенные списки контроля доступа (ACL) позволяют задавать права на шары, файлы и каталоги стандартными Windows-инструментами (Computer Management, вкладка Security в свойствах папки). Поддерживается на членах домена, контроллерах домена AD (DC), NT4 PDC/BDC и standalone-хостах. Права настраиваются не параметрами в <code>smb.conf</code>, а из Windows: базовые POSIX-права задаются один раз при создании шары, всё остальное — Windows-утилитами. ACL хранятся в файловой системе в виде расширенных POSIX ACL и расширенного атрибута <code>security.NTACL</code>.</p>
+<h2>Ключевое</h2>
+<h3>Подготовка хоста</h3>
+<p>Перед созданием шары Samba должна быть настроена: см. <a href="Samba-%D0%BA%D0%B0%D0%BA-%D1%87%D0%BB%D0%B5%D0%BD-%D0%B4%D0%BE%D0%BC%D0%B5%D0%BD%D0%B0.html">Samba как член домена</a>, <a href="%D0%A3%D1%81%D1%82%D0%B0%D0%BD%D0%BE%D0%B2%D0%BA%D0%B0-Samba-AD-DC.html">Установка Samba AD DC</a>, NT4 PDC/BDC или standalone (по типу сервера).</p>
+<h3>Требования к файловой системе</h3>
+<p>Файловая система шары обязана поддерживать:</p>
+<ul>
+<li>пространства имён xattr <code>user</code> и <code>system</code>;</li>
+<li>расширенные ACL.</li>
+</ul>
+<h3>Проверка поддержки ACL в Samba</h3>
+<p>Служба <code>smbd</code> должна быть собрана с поддержкой ACL (на AD DC она включена всегда):</p>
+<pre><code># smbd -b | grep HAVE_LIBACL
+ HAVE_LIBACL
+</code></pre>
+<p>Если вывода нет: Samba собрана с <code>--with-acl-support=no</code> либо configure не нашёл нужные библиотеки (см. Package Dependencies Required to Build Samba).</p>
+<h3>Включение расширенных ACL на Unix domain member</h3>
+<p>Идеально — система с поддержкой NFS4 ACL; для систем вроде Linux добавить в секцию <code>[global]</code> файла <code>smb.conf</code>:</p>
+<pre><code>vfs objects = acl_xattr
+map acl inherit = yes
+# the next line is only required on Samba versions less than 4.9.0
+store dos attributes = yes
+</code></pre>
+<p>На AD DC поддержка расширенных ACL включается глобально автоматически — вручную её включать нельзя. Вместо глобального включения можно добавить те же параметры в секцию отдельной шары. Подробности по параметрам — в man-странице <code>smb.conf(5)</code>.</p>
+<h3>Привилегия SeDiskOperatorPrivilege</h3>
+<ul>
+<li>По умолчанию единственный держатель привилегии — <code>BUILTIN\Administrators</code>.</li>
+<li>Члены <code>BUILTIN\Administrators</code> — это Administrator, Domain Admins и Enterprise Admins; они наследуют её. Значит, при входе в Windows под Administrator или членом Domain Admins/Enterprise Admins выдавать привилегию не нужно вовсе.</li>
+<li>Использовать можно только пользователей и группы, известных Unix: при winbind-бэкенде <code>ad</code> на Unix domain member нужно добавить атрибут <code>uidNumber</code> пользователям или <code>gidNumber</code> группам в AD.</li>
+<li>Рекомендуется выдавать привилегию группе, а не отдельным учёткам: право добавляется/отзывается изменением членства в группе.</li>
+</ul>
+<p>Посмотреть всех держателей привилегии:</p>
+<pre><code># net rpc rights list privileges SeDiskOperatorPrivilege -U &quot;SAMDOM\administrator&quot;
+Enter administrator's password:
+SeDiskOperatorPrivilege:
+ BUILTIN\Administrators
+</code></pre>
+<p>Если привилегию нужно выдать — это делается на том сервере Samba, где расположена шара.</p>
+<h3>Добавление шары</h3>
+<p>Пример: каталог <code>/srv/samba/Demo/</code> под именем шары <code>Demo</code>.</p>
+<p>Создать каталог от root:</p>
+<pre><code># mkdir -p /srv/samba/Demo/
+</code></pre>
+<p>Чтобы не только Administrator мог задавать права из Windows, выдать Full control (rwx) группе, которой выдана SeDiskOperatorPrivilege. Для бэкенда <code>ad</code>:</p>
+<pre><code># chown root:&quot;Unix Admins&quot; /srv/samba/Demo/
+# chmod 0770 /srv/samba/Demo/
+</code></pre>
+<p>Для любого другого бэкенда:</p>
+<pre><code># chown root:&quot;Domain Admins&quot; /srv/samba/Demo/
+# chmod 0770 /srv/samba/Demo/
+</code></pre>
+<p>Добавить определение шары в <code>smb.conf</code>:</p>
+<pre><code>[Demo]
+ path = /srv/samba/Demo/
+ read only = no
+</code></pre>
+<p>Дальнейшие настройки шары и права файловой системы задаются Windows-утилитами. При желании можно добавить строку <code>acl_xattr:ignore system acls = yes</code> в шару (см. «Подводные камни»). Других параметров в определение шары не добавлять.</p>
+<p>Перечитать конфигурацию Samba:</p>
+<pre><code># smbcontrol all reload-config
+</code></pre>
+<h3>Настройка прав шары и ACL из Windows</h3>
+<p>Шара с поддержкой расширенных ACL настраивается Windows-утилитами вместо параметров в секции шары <code>smb.conf</code>:</p>
+<ol>
+<li>Войти на Windows-хост под <code>SAMDOM\Administrator</code> или учёткой из группы шары (например, <code>SAMDOM\john</code>, где john — член Domain Admins).</li>
+<li>Start → Computer Management, запустить приложение.</li>
+<li>Action / Connect to another computer — ввести имя хоста Samba, OK.</li>
+<li>Открыть System Tools / Shared Folders / Shares.</li>
+<li>Правый клик по шаре → Properties.</li>
+<li>Вкладка Share Permissions: должно быть видно только Everyone; если так — ничего не менять, иначе выставить Everyone : Full Control, Change и Read. Samba хранит права этой вкладки в базе <code>/usr/local/samba/var/locks/share_info.tdb</code>.</li>
+<li>Изменения прав делать на вкладке Security: кнопка Edit — задать ACL корневого каталога шары. Добавление группы: Add → Advanced → Find Now → выбрать, например, Domain Users → OK → OK → выбрать права (например, Full control) → подтвердить в окне Windows Security («Do you want to continue») кнопкой Yes → убедиться, что Domain Users появился в списке Group or user names → OK → OK.</li>
+</ol>
+<p>Настраивать вкладку Share Permissions могут только держатели SeDiskOperatorPrivilege; вкладку Security — только пользователь или члены группы, которая назначена owner:group на каталоге шары на сервере.</p>
+<h3>ACL на папке внутри шары</h3>
+<ol>
+<li>Войти на Windows-хост под учёткой с Full control на эту папку.</li>
+<li>Перейти к папке, правый клик → Properties.</li>
+<li>Вкладка Security → кнопка Edit, задать права.</li>
+<li>OK (закрыть Permissions for Folder) → OK (сохранить настройки).</li>
+</ol>
+<h3>ACL в бэкенде</h3>
+<p>Samba хранит права файловой системы в расширенных ACL и расширенном атрибуте. Посмотреть POSIX ACL каталога:</p>
+<pre><code># getfacl /srv/samba/Demo/
+# file: srv/samba/Demo/
+# owner: root
+# group: root
+user::rwx
+user:root:rwx
+group::---
+group:root:---
+group:domain\040users:rwx
+group:unix\040admins:rwx
+mask::rwx
+other::---
+default:user::rwx
+default:user:root:rwx
+default:group::---
+default:group:root:---
+default:group:domain\040users:rwx
+default:group:unix\040admins:rwx
+default:mask::rwx
+default:other::---
+</code></pre>
+<p>Посмотреть расширенный атрибут <code>security.NTACL</code> (вывод — base64-блоб NT ACL):</p>
+<pre><code># getfattr -n security.NTACL -d /srv/samba/Demo/
+</code></pre>
+<p>Приведённые ACL соответствуют следующим Windows-правам:</p>
+<table>
+<thead>
+<tr>
+<th>Principal</th>
+<th>Permissions</th>
+<th>Applies to</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Domain Users (SAMDOM\Domain Users)</td>
+<td>Modify, Read &amp; execute, List folder contents, Read, Write</td>
+<td>(This folder, subfolders and files)</td>
+</tr>
+<tr>
+<td>Unix Admins (SAMDOM\Unix Admins)</td>
+<td>Full control</td>
+<td>(This folder, subfolders and files)</td>
+</tr>
+</tbody>
+</table>
+<p>Более читаемая форма ACL (пример на sysvol):</p>
+<pre><code># samba-tool ntacl get /usr/local/samba/var/locks/sysvol --as-sddl
+# O:BAG:SYD:PAI(A;OICIIO;WOWDGRGWGX;;;CO)(A;OICIIO;GRGX;;;AU)(A;;0x001200a9;;;AU)(A;OICIIO;GA;;;SY)(A;;0x001f01ff;;;SY)(A;OICIIO;WOWDGRGWGX;;;BA)(A;;0x001e01bf;;;BA)(A;OICIIO;GRGX;;;SO)(A;;0x001200a9;;;SO)
+</code></pre>
+<p>По устранению проблем — см. Troubleshooting Samba Domain Members и <a href="%D0%94%D0%B8%D0%B0%D0%B3%D0%BD%D0%BE%D1%81%D1%82%D0%B8%D0%BA%D0%B0-AD-DC.html">Диагностика AD DC</a>.</p>
+<h2>Подводные камни</h2>
+<ul>
+<li>На AD DC поддержка расширенных ACL включается автоматически на глобальном уровне — вручную включать её нельзя.</li>
+<li>Строка <code>store dos attributes = yes</code> нужна только на Samba версии ниже 4.9.0.</li>
+<li>Привилегию можно выдавать только пользователям/группам, известным Unix; при winbind-бэкенде <code>ad</code> требуются атрибуты <code>uidNumber</code>/<code>gidNumber</code> в AD.</li>
+<li>Не добавлять атрибут <code>gidNumber</code> группе Domain Admins при бэкенде <code>ad</code> — это ломает маппинг в <code>idmap.ldb</code> (Domain Admins там имеет тип ID_TYPE_BOTH, чтобы группа могла владеть файлами в Sysvol на Samba AD DC). Вместо этого создать отдельную группу (например, Unix Admins), дать ей <code>gidNumber</code>, включить в Administrators и использовать на Unix вместо Domain Admins.</li>
+<li>С бэкендом <code>ad</code> использовать созданную группу Unix Admins; с любым другим бэкендом (autorid, rid и т.п.) можно использовать Domain Admins.</li>
+<li>Выдавать привилегию рекомендуется группе, а не отдельным учёткам.</li>
+<li>SeDiskOperatorPrivilege выдаётся именно на том сервере Samba, где лежит шара.</li>
+<li>Строку <code>acl_xattr:ignore system acls = yes</code> добавлять только ПОСЛЕ того, как права шары настроены из Windows, иначе можно потерять возможность менять права из Windows. После её добавления <code>setfacl</code> на каталоге шары не покажет изменения, сделанные из Windows (Samba игнорирует стандартные Unix-ACL ugo). Добавлять строку только если подключаться к шаре будут исключительно через Samba.</li>
+<li>Не задавать НИКАКИХ дополнительных параметров в определении шары — любой дополнительный параметр может помешать настройке или использованию шары.</li>
+<li>Вкладку Share Permissions трогать не нужно (только при наличии проблем; перед её использованием лучше посоветоваться в списке рассылки samba): на ней должно быть ровно Everyone с Full Control, Change и Read — менять права следует на вкладке Security.</li>
+<li>Настраивать вкладку Share Permissions могут только держатели SeDiskOperatorPrivilege, вкладку Security — только owner:group каталога шары на сервере.</li>
+</ul>
+<h2>Связанные заметки</h2>
+<ul>
+<li><a href="Samba-%D0%BA%D0%B0%D0%BA-%D1%87%D0%BB%D0%B5%D0%BD-%D0%B4%D0%BE%D0%BC%D0%B5%D0%BD%D0%B0.html">Samba как член домена</a></li>
+<li><a href="%D0%A3%D1%81%D1%82%D0%B0%D0%BD%D0%BE%D0%B2%D0%BA%D0%B0-Samba-AD-DC.html">Установка Samba AD DC</a></li>
+<li><a href="%D0%94%D0%B8%D0%B0%D0%B3%D0%BD%D0%BE%D1%81%D1%82%D0%B8%D0%BA%D0%B0-AD-DC.html">Диагностика AD DC</a></li>
+</ul>
+</main>
+</body>
+</html>

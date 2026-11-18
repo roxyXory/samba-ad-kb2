@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Передача и захват FSMO-ролей (Transferring and Seizing FSMO Roles)</title>
+<link rel="stylesheet" href="../style.css">
+</head>
+<body>
+<nav><a href="../index.html">База знаний Samba AD DC</a></nav>
+<main><h1>Передача и захват FSMO-ролей (Transferring and Seizing FSMO Roles)</h1>
+<h2>Суть</h2>
+<p>Статья описывает два способа смены владельца FSMO-ролей в домене Samba AD: плановый перенос (transfer) и аварийный захват (seize) командами <code>samba-tool fsmo transfer</code> и <code>samba-tool fsmo seize</code>. По возможности роли следует переносить, а не захватывать: перенос требует, чтобы текущий владелец роли был работоспособен и доступен по сети, и старый DC «узнаёт», что роли у него больше нет. Захват допустим, только если прежний владелец сломан окончательно; такой DC ни в коем случае нельзя снова подключать к сети, иначе возникнут конфликты и AD станет неконсистентным.</p>
+<h2>Ключевое</h2>
+<h3>Разница между переносом и захватом</h3>
+<ul>
+<li><strong>Перенос (transfer)</strong> — рекомендуемый и более чистый способ. Требует, чтобы DC — текущий владелец роли — работал и был подключён к сети. После переноса старый DC знает, что ролью он больше не владеет.</li>
+<li><strong>Захват (seize)</strong> — применяется, только если DC сломан (например, аппаратный дефект) и уже не вернётся. Критично: старый DC никогда не подключать к сети снова — он не узнает о смене роли и продолжит считать себя ответственным за связанные с ней задачи, что приведёт к конфликтам и неконсистентному AD.</li>
+</ul>
+<h3>Три ситуации, когда DC с FSMO-ролями недоступен</h3>
+<ol>
+<li><strong>Плановый простой, DC скоро вернётся</strong> (перезагрузка, замена железа и т. п.) — временно перенести роли на другой DC либо учитывать эффекты простоя (подробности о ролях — в статье вики «The seven FSMO roles»: https://wiki.samba.org/index.php/Flexible_Single_Master_Operations_%28FSMO%29_roles).</li>
+<li><strong>DC планируется понизить</strong> — перенести роли на другой DC до понижения (см. <a href="%D0%9F%D0%BE%D0%BD%D0%B8%D0%B6%D0%B5%D0%BD%D0%B8%D0%B5-%D1%80%D0%BE%D0%BB%D0%B8-AD-DC.html">Понижение роли AD DC</a>).</li>
+<li><strong>DC отключился из-за проблемы</strong>:
+<ol>
+<li>Не паниковать!</li>
+<li>Выяснить, какие роли были затронуты и что это значит для леса.</li>
+<li>Попытаться починить DC и вернуть его в сеть. Если не выйдет — <strong>никогда</strong> не восстанавливать DC из резервной копии: понизить его и заменить новым DC. Если в домене работают другие DC, восстановление из бэкапа приведёт к тому, что репликация перемешает каталог. Восстанавливать из резервной копии можно только полностью сломанный домен, когда <strong>нет ни одного</strong> работающего DC, — доменным бэкапом, созданным <code>samba-tool</code> (см. <a href="%D0%A0%D0%B5%D0%B7%D0%B5%D1%80%D0%B2%D0%BD%D0%BE%D0%B5-%D0%BA%D0%BE%D0%BF%D0%B8%D1%80%D0%BE%D0%B2%D0%B0%D0%BD%D0%B8%D0%B5-%D0%B8-%D0%B2%D0%BE%D1%81%D1%81%D1%82%D0%B0%D0%BD%D0%BE%D0%B2%D0%BB%D0%B5%D0%BD%D0%B8%D0%B5-AD-DC.html">Резервное копирование и восстановление AD DC</a>).</li>
+<li>Если вернуть DC шансов нет — захватить роли на оставшемся DC и понизить сломанный.</li>
+</ol>
+</li>
+</ol>
+<h3>Просмотр текущих владельцев FSMO-ролей</h3>
+<p>На любом DC выполнить:</p>
+<pre><code># samba-tool fsmo show
+InfrastructureMasterRole owner: CN=NTDS Settings,CN=DC1,CN=Servers,CN=Default-First-Site-Name,CN=Sites,CN=Configuration,DC=samdom,DC=example,DC=com
+RidAllocationMasterRole owner: CN=NTDS Settings,CN=DC1,CN=Servers,CN=Default-First-Site-Name,CN=Sites,CN=Configuration,DC=samdom,DC=example,DC=com
+PdcEmulationMasterRole owner: CN=NTDS Settings,CN=DC1,CN=Servers,CN=Default-First-Site-Name,CN=Sites,CN=Configuration,DC=samdom,DC=example,DC=com
+DomainNamingMasterRole owner: CN=NTDS Settings,CN=DC1,CN=Servers,CN=Default-First-Site-Name,CN=Sites,CN=Configuration,DC=samdom,DC=example,DC=com
+SchemaMasterRole owner: CN=NTDS Settings,CN=DC1,CN=Servers,CN=Default-First-Site-Name,CN=Sites,CN=Configuration,DC=samdom,DC=example,DC=com
+DomainDnsZonesMasterRole owner: CN=NTDS Settings,CN=DC1,CN=Servers,CN=Default-First-Site-Name,CN=Sites,CN=Configuration,DC=samdom,DC=example,DC=com
+ForestDnsZonesMasterRole owner: CN=NTDS Settings,CN=DC1,CN=Servers,CN=Default-First-Site-Name,CN=Sites,CN=Configuration,DC=samdom,DC=example,DC=com
+</code></pre>
+<p>До Samba 4.3.0 команда показывает только 5 из 7 ролей (без <code>DomainDnsZonesMasterRole</code> и <code>ForestDnsZonesMasterRole</code>). Для старых версий владельцы всех ролей — через <code>ldbsearch</code>:</p>
+<pre><code>ldbsearch --cross-ncs -H /usr/local/samba/private/sam.ldb '(fsmoroleowner=*)' |\
+ grep 'dn:' | sed 's|dn: ||'
+</code></pre>
+<p>Результат — список DN, где хранятся владельцы ролей:</p>
+<pre><code>CN=Schema,CN=Configuration,DC=samdom,DC=example,DC=com
+CN=Partitions,CN=Configuration,DC=samdom,DC=example,DC=com
+CN=Infrastructure,DC=DomainDnsZones,DC=samdom,DC=example,DC=com
+CN=Infrastructure,DC=ForestDnsZones,DC=samdom,DC=example,DC=com
+DC=samdom,DC=example,DC=com
+CN=RID Manager$,CN=System,DC=samdom,DC=example,DC=com
+CN=Infrastructure,DC=samdom,DC=example,DC=com
+</code></pre>
+<p>Владелец конкретной роли (пример для DomainDnsZones):</p>
+<pre><code>ldbsearch --cross-ncs -H /var/lib/samba/private/sam.ldb -b &quot;CN=Infrastructure,DC=DomainDnsZones,DC=samdom,DC=example,DC=com&quot; \
+-s base fsmoroleowner
+</code></pre>
+<pre><code># record 1
+dn: CN=Infrastructure,DC=DomainDnsZones,DC=samdom,DC=example,DC=com
+fSMORoleOwner: CN=NTDS Settings,CN=DC1,CN=Servers,CN=Default-First-Site-Name,CN=Sites,CN=Configuration,DC=samdom,DC=example,DC=com
+</code></pre>
+<h3>Перенос FSMO-роли</h3>
+<ol>
+<li>Зайти на DC, который должен стать новым владельцем переносимой роли.</li>
+<li>Перенести роль:</li>
+</ol>
+<pre><code># samba-tool fsmo transfer --role=...
+FSMO transfer of '...' role successful
+</code></pre>
+<ol start="3">
+<li>Убедиться, что роль перенесена: <code>samba-tool fsmo show</code>.</li>
+</ol>
+<h3>Захват FSMO-роли</h3>
+<ol>
+<li>Зайти на DC, который должен стать новым владельцем роли.</li>
+<li>Захватить роль на текущий DC:</li>
+</ol>
+<pre><code># samba-tool fsmo seize --role=...
+Attempting transfer...
+Transfer unsuccessful, seizing...
+FSMO seize of '...' role successful
+</code></pre>
+<ol start="3">
+<li>Убедиться, что роль перешла: <code>samba-tool fsmo show</code>.</li>
+<li>Убедиться, что старый DC никогда не будет подключён к сети!</li>
+</ol>
+<h3>Управление FSMO-ролями из Windows</h3>
+<p>См. https://support.microsoft.com/en-us/kb/324801</p>
+<h2>Подводные камни</h2>
+<ul>
+<li>После захвата (seize) старый DC <strong>никогда</strong> не подключать к сети: он не узнает о смене владельца, продолжит выполнять задачи роли, и это приведёт к конфликтам и неконсистентному AD.</li>
+<li>Никогда не восстанавливать DC из резервной копии, пока в домене работает хотя бы один DC — репликация может перемешать каталог. Восстановление из бэкапа допустимо только для полностью погибшего домена (нет ни одного работающего DC) доменным бэкапом <code>samba-tool</code>.</li>
+<li>Если переносится или захватывается <strong>вся</strong> совокупность FSMO-ролей либо роль <code>domaindns</code> или <code>forestdns</code> — <strong>обязательно</strong> требуется аутентификация.</li>
+<li>В ранних версиях <code>samba-tool</code> был баг, препятствовавший захвату роли Domain Naming Master. Обход — добавить параметр <code>--force</code> (временное решение) и как можно скорее обновиться до поддерживаемой версии Samba.</li>
+<li>До Samba 4.3.0 <code>samba-tool fsmo show</code> показывает только 5 из 7 ролей — владельцев DNS-ролей смотреть через <code>ldbsearch</code>.</li>
+</ul>
+<h2>Связанные заметки</h2>
+<ul>
+<li><a href="%D0%9F%D0%BE%D0%BD%D0%B8%D0%B6%D0%B5%D0%BD%D0%B8%D0%B5-%D1%80%D0%BE%D0%BB%D0%B8-AD-DC.html">Понижение роли AD DC</a></li>
+<li><a href="%D0%A0%D0%B5%D0%B7%D0%B5%D1%80%D0%B2%D0%BD%D0%BE%D0%B5-%D0%BA%D0%BE%D0%BF%D0%B8%D1%80%D0%BE%D0%B2%D0%B0%D0%BD%D0%B8%D0%B5-%D0%B8-%D0%B2%D0%BE%D1%81%D1%81%D1%82%D0%B0%D0%BD%D0%BE%D0%B2%D0%BB%D0%B5%D0%BD%D0%B8%D0%B5-AD-DC.html">Резервное копирование и восстановление AD DC</a></li>
+<li><a href="%D0%9F%D1%80%D0%B8%D1%81%D0%BE%D0%B5%D0%B4%D0%B8%D0%BD%D0%B5%D0%BD%D0%B8%D0%B5-%D0%B2%D1%82%D0%BE%D1%80%D0%BE%D0%B3%D0%BE-DC-%D0%BA-%D0%B4%D0%BE%D0%BC%D0%B5%D0%BD%D1%83.html">Присоединение второго DC к домену</a></li>
+<li><a href="%D0%94%D0%B8%D0%B0%D0%B3%D0%BD%D0%BE%D1%81%D1%82%D0%B8%D0%BA%D0%B0-AD-DC.html">Диагностика AD DC</a></li>
+</ul>
+</main>
+</body>
+</html>

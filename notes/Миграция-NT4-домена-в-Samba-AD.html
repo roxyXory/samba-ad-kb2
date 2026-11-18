@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Миграция NT4-домена в Samba AD (classicupgrade)</title>
+<link rel="stylesheet" href="../style.css">
+</head>
+<body>
+<nav><a href="../index.html">База знаний Samba AD DC</a></nav>
+<main><h1>Миграция NT4-домена в Samba AD (classicupgrade)</h1>
+<h2>Суть</h2>
+<p><code>samba-tool domain classicupgrade</code> — встроенная в samba-tool функция полной замены существующего Samba NT4-домена на Samba Active Directory. Она выполняет роль шага provisioning в инструкции по установке AD DC и работает со всеми passdb-бэкендами (smbpasswd, tdbsam, ldapsam). Пользователи и машины после миграции просто переподключаются к новому контроллеру без повторного ввода в домен — SID домена, RID и пароли аккаунтов (включая машинный пароль DC из <code>secrets.tdb</code>) переносятся из старых баз, поэтому доверие машинных аккаунтов членов домена сохраняется. Межлесные и междоменные доверия NT4 при этом <strong>не</strong> переносятся — их создают заново уже как доверия AD (см. <a href="%D0%94%D0%BE%D0%B2%D0%B5%D1%80%D0%B8%D1%82%D0%B5%D0%BB%D1%8C%D0%BD%D1%8B%D0%B5-%D0%BE%D1%82%D0%BD%D0%BE%D1%88%D0%B5%D0%BD%D0%B8%D1%8F-%D0%BC%D0%B5%D0%B6%D0%B4%D1%83-%D0%B4%D0%BE%D0%BC%D0%B5%D0%BD%D0%B0%D0%BC%D0%B8.html">Доверительные отношения между доменами</a>). Миграция односторонняя: как только клиенты обратились к новому AD DC, вернуться к NT4-домену нельзя даже откатом изменений, поэтому процесс сначала прогоняют в изолированной от production сети. Отдельный сценарий — переезд с Windows AD: до вывода Windows DC нужно поднять схему и preparation level штатным adprep, а домен с функциональным уровнем 2012 или выше Samba долгое время присоединить не могла (ошибка <code>WERR_DS_INCOMPATIBLE_VERSION</code>).</p>
+<h2>Ключевое</h2>
+<h3>Что такое classicupgrade</h3>
+<ul>
+<li>Это функция внутри <code>samba-tool</code>, предназначенная для полной замены существующего Samba NT4-домена. Пользователи и машины после конвертации просто переподключаются к новому Samba AD — вручную заново вводить их в домен не требуется.</li>
+<li>«Doing a classicupgrade is possible from all passwd backends (smbpasswd, tdbsam and ldapsam)» — поддерживаются все три бэкенда passdb.</li>
+<li>Процедура применима как к апгрейду существующей установки Samba на том же сервере, так и к переносу на новый сервер (например, при одновременной замене железа).</li>
+<li>classicupgrade заменяет шаг provisioning: после успешного апгрейда нужно продолжить по инструкции установки AD DC (см. <a href="%D0%A3%D1%81%D1%82%D0%B0%D0%BD%D0%BE%D0%B2%D0%BA%D0%B0-Samba-AD-DC.html">Установка Samba AD DC</a>), пропустив provisioning.</li>
+<li>Запуск возможен и на PDC, и на BDC-инсталляции; в коде serverrole берётся из старого smb.conf, а если роль не PDC/BDC, то DNS-бэкенд принудительно ставится в <code>NONE</code>.</li>
+</ul>
+<h3>Точная команда</h3>
+<p>Синтаксис (man-страница samba-tool, раздел <code>domain classicupgrade</code>): <code>domain classicupgrade [options] classic_smb_conf</code>, описание — «Upgrade from Samba classic (NT4-like) database to Samba AD DC database». Старый <code>smb.conf</code> передаётся последним позиционным аргументом.</p>
+<p>С внутренним DNS (из вики, дословно):</p>
+<pre><code># samba-tool domain classicupgrade --dbdir=/usr/local/samba.PDC/dbdir/ \
+--realm=SAMDOM.EXAMPLE.COM --dns-backend=SAMBA_INTERNAL /usr/local/samba.PDC/etc/smb.PDC.conf
+</code></pre>
+<p>С BIND9_DLZ (из вики, дословно):</p>
+<pre><code># samba-tool domain classicupgrade --dbdir=/usr/local/samba.PDC/dbdir/ \
+--realm=SAMDOM.EXAMPLE.COM --dns-backend=BIND9_DLZ /usr/local/samba.PDC/etc/smb.PDC.conf
+</code></pre>
+<p>Пояснения параметров из вики:</p>
+<pre><code>--dbdir=                 Path to samba classic DC directory, containing all databases required for
+                         the migration
+--realm=                 Set the realm name
+--dns-backend=           Optional. 
+                         Required if BIND9_DLZ should be used as DNS backend.
+                         Default is the internal DNS (SAMBA_INTERNAL)
+</code></pre>
+<p>Если у контроллера несколько NIC, classicupgrade сам выбирает IPv4/v6-адрес одного из них; чтобы привязать Samba к конкретному интерфейсу и localhost, в вики предлагается добавить в команду <code>--option=&quot;interfaces=lo eth0&quot; --option=&quot;bind interfaces only=yes&quot;</code>.</p>
+<p>Опции, которые реально объявлены в коде команды (<code>python/samba/netcmd/domain/classicupgrade.py</code>):</p>
+<ul>
+<li><code>--dbdir=DIR</code> — «Path to samba classic DC database directory» (каталог старых баз).</li>
+<li><code>--testparm=PATH</code> — путь к утилите testparm прежней установки: тогда пути по умолчанию берутся из старой инсталляции. <code>--dbdir</code> и <code>--testparm</code> — альтернативы, одну из них указать обязательно (иначе ошибка «Please specify either dbdir or testparm»); если заданы обе, <code>--dbdir</code> игнорируется с предупреждением «both dbdir and testparm specified, ignoring dbdir.»</li>
+<li><code>--targetdir=DIR</code> — «Path prefix where the new Samba 4.0 AD domain should be initialised».</li>
+<li><code>-q</code>/<code>--quiet</code>, <code>-v</code>/<code>--verbose</code>.</li>
+<li><code>--dns-backend</code> — выбор из <code>SAMBA_INTERNAL</code> (по умолчанию), <code>BIND9_FLATFILE</code>, <code>BIND9_DLZ</code>, <code>NONE</code>; в тексте справки: <code>NONE</code> пропускает настройку DNS целиком (этот DC не будет DNS-сервером). В вики для этой процедуры описаны только <code>SAMBA_INTERNAL</code> и <code>BIND9_DLZ</code>.</li>
+<li><code>--use-xattrs=yes|no|auto</code> (по умолчанию <code>auto</code>) и <code>--use-ntvfs</code> — объявляются только если Samba собрана с файловым сервером NTVFS (<code>samba.is_ntvfs_fileserver_built()</code>). Справка: «Define if we should use the native fs capabilities or a tdb file for storing attributes likes ntacl when --use-ntvfs is set. auto tries to make an intelligent guess based on the user rights and system capabilities». При обычной сборке (s3fs) <code>--use-xattrs=no</code> без <code>--use-ntvfs</code> отклоняется ошибкой «--use-xattrs=no requires --use-ntvfs (not supported for production use). Please re-run with --use-xattrs omitted.», а режим <code>auto</code> даёт <code>eadb = False</code>, то есть атрибуты хранятся в xattr файловой системы.</li>
+<li><code>--realm</code> — это общая опция Samba (<code>-r|--realm=REALM</code>), а не специфичная для classicupgrade; man-страница пишет: «Set the realm for the domain. Note that specifying this parameter here will override the realm parameter in the ${prefix}/etc/smb.conf file.» В коде classicupgrade значение из <code>--realm</code> подставляется в старый конфиг перед апгрейдом.</li>
+</ul>
+<p>Запускать classicupgrade нужно от root: «The classicupgrade step must be run as user root. Otherwise you will get permission denied errors!». Файл <code>smb.conf</code> из позиционного аргумента и каталог <code>--dbdir</code> должны существовать — иначе команда сразу падает с CommandError.</p>
+<h3>Что обязательно перенести: tdb-базы и старый smb.conf</h3>
+<p>Вся информация берётся из баз старого PDC, поэтому их надо собрать в одном каталоге (в вики — <code>/usr/local/samba.PDC/dbdir/</code>). Создание каталогов и перенос баз (дословно из вики; именно <code>mv</code>, чтобы старая установка не подняла их снова при автозапуске):</p>
+<pre><code># mkdir -p /usr/local/samba.PDC/dbdir/
+# mkdir /usr/local/samba.PDC/etc
+
+# mv /usr/local/samba/private/secrets.tdb /usr/local/samba.PDC/dbdir/
+# mv /usr/local/samba/private/schannel_store.tdb /usr/local/samba.PDC/dbdir/
+# mv /usr/local/samba/private/passdb.tdb /usr/local/samba.PDC/dbdir/
+# mv /usr/local/samba/var/locks/group_mapping.tdb /usr/local/samba.PDC/dbdir/
+# mv /usr/local/samba/var/locks/account_policy.tdb /usr/local/samba.PDC/dbdir/
+</code></pre>
+<p>Перенос старого конфига:</p>
+<pre><code># mv /usr/local/samba/etc/smb.conf /usr/local/samba.PDC/etc/smb.PDC.conf
+</code></pre>
+<p>Роль отдельных файлов (по коду <code>python/samba/upgrade.py</code> и вики):</p>
+<ul>
+<li><code>secrets.tdb</code> — обязателен: без него апгрейд падает с «Could not open '%s', the Samba3 secrets database… Perhaps you specified the incorrect smb.conf, --testparm or --dbdir option?». Оттуда берутся доменное имя (если нет <code>workgroup</code>), пароль машинного аккаунта DC (<code>get_machine_password</code>) и, для <code>ldapsam</code>, пароль привязки к LDAP (<code>get_ldap_bind_pw</code>).</li>
+<li><code>passdb.tdb</code> + <code>group_mapping.tdb</code> — пользователи, группы и их маппинги (для бэкендов smbpasswd/tdbsam).</li>
+<li><code>account_policy.tdb</code> — парольная политика.</li>
+<li><code>schannel_store.tdb</code> — переносится вики-инструкцией в общий каталог баз.</li>
+<li>Дополнительно classicupgrade пытается прочитать <code>wins.dat</code> и idmap-базу в том же <code>--dbdir</code>. Если их нет — это не ошибка: в примере вывода вики видно «Cannot open wins database, Ignoring: [Errno 2] No such file or directory: '/usr/local/samba.PDC/dbdir/wins.dat'» и «Cannot open idmap database, Ignoring». Обратите внимание: <code>wins.dat</code> в списке <code>mv</code> из вики не упомянут, хотя читается именно из <code>--dbdir</code>.</li>
+</ul>
+<h3>Что мигрирует</h3>
+<ul>
+<li><strong>SID домена и RID.</strong> Новый домен создаётся на основе SID старого NT4-домена, а аккаунты сохраняют свои SID (provision вызывается с <code>domainsid</code> и <code>next_rid</code> из старой базы). Следующий свободный RID считается от максимального: в примере вывода вики «Next rid = 1007». Именно поэтому клиенты и машины продолжают работать без повторного ввода в домен — Windows опознаёт аккаунты по SID.</li>
+<li><strong>Пользователи, группы, алиасы и членство.</strong> Импортируются пользовательские и машинные аккаунты, группы и локальные группы вместе с участниками; в примере вывода: «Adding groups / Importing groups … Adding users / Importing users / Adding users to groups». Уже существующие группы пропускаются с предупреждением, например «Group already exists sid=…-513, groupname=Domain Users existing_groupname=Domain Users, Ignoring.».</li>
+<li><strong>Парольная политика.</strong> Переносятся только <code>min password length</code>, <code>password history</code>, <code>minimum password age</code>, <code>maximum password age</code>, <code>lockout duration</code> (в терминах NT: minPwdLength, pwdHistoryLength, minPwdAge, maxPwdAge, lockoutDuration). Не переносятся: reset count minutes, user must logon to change password, bad lockout minutes, disconnect time — это прямо перечислено комментарием в коде.</li>
+<li><strong>POSIX-атрибуты и idmap.</strong> Импортируется idmap-база (нижняя граница диапазона выставляется по старому high-water mark), а в AD записываются <code>uidNumber</code>/<code>gidNumber</code> (и <code>posixAccount</code>/<code>posixGroup</code>), <code>unixHomeDirectory</code>, <code>loginShell</code>, <code>msSFU30NisDomain</code> — provision выполняется с <code>use_rfc2307=True</code>. Источники значений: старый idmap, а при его отсутствии — записи <code>/etc/passwd</code> (или LDAP-атрибуты для ldapsam). Подробнее про idmap — <a href="Idmap-%D0%B1%D1%8D%D0%BA%D0%B5%D0%BD%D0%B4%D1%8B-%D0%B8-RFC2307.html">Idmap бэкенды и RFC2307</a>.</li>
+<li><strong>WINS-база</strong> — если <code>wins.dat</code> есть, записи переносятся («Importing WINS database»).</li>
+<li><strong>Пароль Administrator.</strong> В конце апгрейда выполняется «Setting password for administrator»: пароль AD-администратора становится паролем старого аккаунта <code>administrator</code>, а если такого нет — аккаунта <code>root</code> (сообщение «Administrator password has been set to password of user '%s'»). Для аккаунта <code>administrator</code> жёстко требуется RID 500: иначе «User 'Administrator' in your existing directory has SID … expected it to be …-500» и ProvisioningError. Про <code>root</code> выводятся предупреждения: если у него SID <code>-500</code>, то «User root has been replaced by Administrator», иначе «User root has been kept in the directory, it should be removed in favour of the Administrator user».</li>
+<li><strong>Машинный пароль DC</strong> переносится из <code>secrets.tdb</code> — благодаря этому доверие машинных аккаунтов членов домена сохраняется: сами машинные пароли лежат в старых базах, компьютеры не переприсоединяются. Это не межлесные/междоменные доверия — те не переносятся (см. ниже и <a href="%D0%94%D0%BE%D0%B2%D0%B5%D1%80%D0%B8%D1%82%D0%B5%D0%BB%D1%8C%D0%BD%D1%8B%D0%B5-%D0%BE%D1%82%D0%BD%D0%BE%D1%88%D0%B5%D0%BD%D0%B8%D1%8F-%D0%BC%D0%B5%D0%B6%D0%B4%D1%83-%D0%B4%D0%BE%D0%BC%D0%B5%D0%BD%D0%B0%D0%BC%D0%B8.html">Доверительные отношения между доменами</a>).</li>
+<li><strong>BDC.</strong> Аккаунт BDC понижается до обычного машинного аккаунта: «Demoting BDC account trust for %s, this DC must be elevated to an AD DC using 'samba-tool domain dcpromo'» (команда <code>domain dcpromo</code> задокументирована в man-странице как «Promote an existing domain member or NT4 PDC to an AD DC»). Межлесные/междоменные доверия NT4 не переносятся: «Skipping inter-domain trust from domain %s, this trust must be re-created as an AD trust».</li>
+<li><strong>Функциональный уровень.</strong> Апгрейд провижинит домен с <code>dom_for_fun_level=dsdb.DS_DOMAIN_FUNCTION_2003</code> (в <code>libds/common/flags.h</code> <code>DS_DOMAIN_FUNCTION_2003 = 2</code>), то есть и домен, и лес получают уровень 2003 (в provision значение по умолчанию, если параметр не задан, — <code>DS_DOMAIN_FUNCTION_2008_R2</code>). Повышать уровень нужно отдельно (см. ниже).</li>
+</ul>
+<h3>Что не мигрирует и что нельзя изменить потом</h3>
+<ul>
+<li><strong>Не все LDAP-атрибуты.</strong> Для <code>passdb backend = ldapsam</code> вики прямо предупреждает: «Sadly classicupdate currently does not migrate all attributes found in LDAP» (в вики указан трекер — bug report #9908). Улучшения, если они появятся, сработают только в момент апгрейда — после миграции уже нет. Обходной путь из вики: перевести LDAP старого домена на нестандартный порт (если он на той же машине, что и новый AD) и скриптом перенести нужные атрибуты в LDIF, затем импортировать их в <code>sam.ldb</code>:</li>
+</ul>
+<pre><code># ldbmodify -H path/to/sam.ldb LDIFfilename
+</code></pre>
+<ul>
+<li><strong>AD-имя и realm.</strong> «Currently Samba does not provide capabilities to change the AD Domain Name afterwards!» — имя AD-домена/realm выбирается один раз и навсегда (это согласуется с <a href="%D0%98%D0%BC%D0%B5%D0%BD%D0%BE%D0%B2%D0%B0%D0%BD%D0%B8%D0%B5-%D0%B4%D0%BE%D0%BC%D0%B5%D0%BD%D0%B0-FAQ.html">Именование домена FAQ</a>).</li>
+<li><strong>Реестр/шары старого PDC.</strong> В коде <code>upgrade.py</code> вызов <code>import_registry(...)</code> закомментирован с пометкой <code># FIXME</code>, то есть определения шар из реестра Samba 3 не переносятся.</li>
+<li><strong>Пользователи с RID &lt; 1000.</strong> Код пропускает «well-known» записи: «Skipping wellknown rid=%d (for username=%s)». Если такие пользователи должны существовать в AD, их RID надо изменить до апгрейда (см. ниже).</li>
+<li><strong>Маппинги well-known SID на Unix-группы.</strong> Вики: если well-known SID (например, Domain Users) были смаппированы на Unix-группу, такие маппинги надо удалить и не создавать заново.</li>
+<li><strong>Unix ID, равные Windows RID.</strong> Вики не рекомендует использовать Windows RID как uidNumber/gidNumber и советует поменять такие значения и снять Unix ID с well-known SID <strong>до</strong> апгрейда.</li>
+</ul>
+<h3>Подготовка: необратимость, дубли SID, конфликты имён</h3>
+<ul>
+<li>Обратимость: «The migration from an NT4-style domain to Active Directory is one way! This means that once your clients contact your migrated AD Domain Controller, they will never be able to access the NT4-style domain again - even if you roll back your changes!» Вики настоятельно рекомендует сначала прогнать процесс в отдельной от production сети.</li>
+<li>Дубли SID: они встречаются в старых базах из-за отсутствия проверок, ручных правок и т. п. Проверять их надо до апгрейда — иначе classicupgrade невозможен. Для ldapsam вики даёт скрипт, который ищет дубли по выводу <code>slapcat</code> (скрипт в вики написан под Python 2 — <code>print</code> без скобок); для smbpasswd/tdbsam — разбирать вывод:</li>
+</ul>
+<pre><code># pdbedit -Lv
+# net groupmap list
+</code></pre>
+<ul>
+<li>Смена SID у группы — удалить маппинг и создать заново (новый SID получит следующий свободный RID):</li>
+</ul>
+<pre><code># net groupmap delete ntgroup=&quot;demo group&quot;
+Successfully removed demo group from the mapping db
+
+# net groupmap add ntgroup=&quot;Demo Group&quot; unixgroup=&quot;demo group&quot;
+No rid or sid specified, choosing a RID
+Got RID 1009
+Successfully added group Demo Group to the mapping db as a domain group
+</code></pre>
+<ul>
+<li>Смена RID у пользователя/машины — вручную:</li>
+</ul>
+<pre><code># net maxrid
+Currently used maximum rid: 3001
+
+# pdbedit -U 3002 -u demo1
+...
+User SID:   S-1-5-21-4097619914-84555263-3210783664-3002
+</code></pre>
+<ul>
+<li>Код дополнительно проверяет совпадения и падает: «Please remove duplicate group sid entries before upgrade.», «Please remove duplicate user sid entries before upgrade.», «Please remove duplicate sid entries before upgrade.» и «Please remove common user/group names before upgrade.» (последнее — если имя пользователя совпадает с именем группы; в вики то же сообщение приведено как «ProvisioningError: Please remove common user/group names before upgrade.»). Также требуется уникальность displayName у групп.</li>
+<li><code>slapd.conf</code> только при <code>ldapsam</code>: если объектов много, надо поднять лимит выдачи поиска, иначе classicupgrade не вычитает всё: <code>sizelimit {&lt;integer&gt;|unlimited}</code> (по умолчанию 500).</li>
+<li>Имя DC: netbios name задаётся в старом smb.conf, который пойдёт на вход апгрейду (например, <code>netbios name = DC1</code>), и обязан совпадать с коротким hostname будущего DC. Переименование DC после миграции возможно, но вики называет это лишней работой и источником проблем.</li>
+<li>Realm: если в старом smb.conf нет параметра <code>realm</code>, а старая установка — PDC/BDC, апгрейд останавливается ошибкой «No realm specified in smb.conf file and being a DC. That upgrade path doesn't work! Please add a 'realm' directive to your old smb.conf…». Либо добавьте <code>realm</code> в старый конфиг, либо задайте <code>--realm</code> в командной строке.</li>
+<li>Порядок запуска: на той же машине, что старый PDC, службы smbd, nmbd и winbind останавливаются, а LDAP-сервер (при <code>ldapsam</code>) продолжает работать до конца апгрейда.</li>
+<li>Повторный запуск classicupgrade требует очистки результата предыдущей попытки:</li>
+</ul>
+<pre><code># rm -f /usr/local/samba/etc/smb.conf
+# rm -rf /usr/local/samba/private/*
+</code></pre>
+<ul>
+<li>Если на машине есть ещё и старая Samba, вики советует поставить <code>/usr/local/samba/bin/</code> и <code>/usr/local/samba/sbin/</code> в начало <code>$PATH</code> и проверять версию командой <code>samba --version</code>, чтобы случайно не запустить старые бинарники.</li>
+</ul>
+<h3>После classicupgrade: зачистка и продолжение</h3>
+<p>Список вики:</p>
+<ul>
+<li>Для <code>ldapsam</code> — выключить внешний LDAP-сервер: Samba AD поднимает собственный LDAP на портах 389/tcp и 636/tcp.</li>
+<li>Отключить автоматический запуск служб старого PDC и LDAP.</li>
+<li>Включить автозапуск службы Samba AD (см. <a href="%D0%A3%D0%BF%D1%80%D0%B0%D0%B2%D0%BB%D0%B5%D0%BD%D0%B8%D0%B5-%D1%81%D0%BB%D1%83%D0%B6%D0%B1%D0%BE%D0%B9-AD-DC.html">Управление службой AD DC</a>).</li>
+<li>Для <code>smbpasswd</code>/<code>tdbsam</code> — удалить доменные группы из <code>/etc/group</code> (все группы с маппингом импортированы вместе с участниками) и убрать Samba-пользователей из <code>/etc/passwd</code> (теперь они хранятся в AD).</li>
+<li>При внутреннем DNS добавить в smb.conf строку форвардера, например <code>dns forwarder = 8.8.8.8</code>.</li>
+<li>В <code>/etc/resolv.conf</code> первым nameserver указать IP-адрес DC.</li>
+<li>Установить winbind, если он ещё не установлен.</li>
+<li>Жёсткое ограничение вики: «Once you have upgraded your NT4-style domain to an AD domain, be very selective about what lines you add to your new smb.conf. Never add any idmap config or vfs object lines.»</li>
+<li>Продолжить по инструкции AD DC (<a href="%D0%A3%D1%81%D1%82%D0%B0%D0%BD%D0%BE%D0%B2%D0%BA%D0%B0-Samba-AD-DC.html">Установка Samba AD DC</a>) — с шага, следующего за provisioning. Кроме того, вики просит сообщать обо всех необработанных исключениях в bugzilla: classicupgrade пока не все ошибки объясняет понятным сообщением.</li>
+</ul>
+<p>Ориентир для проверки — пример вывода успешного апгрейда из вики (фрагмент; многоточиями отмечены пропущенные промежуточные строки): <code>Reading smb.conf</code> → <code>Provisioning</code> → <code>Exporting account policy</code> → <code>Exporting groups</code> → <code>Exporting users</code> → <code>Next rid = 1007</code> → <code>Exporting posix attributes</code> → <code>Reading WINS database</code> → … → <code>Setting up sam.ldb schema</code> → … → <code>Setting up well known security principals</code> → <code>Setting up sam.ldb users and groups</code> → … → <code>Importing WINS database</code> → <code>Importing Account policy</code> → <code>Importing idmap database</code> → <code>Adding groups</code> → <code>Importing groups</code> → <code>Adding users</code> → <code>Importing users</code> → <code>Adding users to groups</code> → <code>Setting password for administrator</code>.</p>
+<h3>Переезд с Windows AD: что сделать до вывода Windows DC</h3>
+<p>Полный разбор adprep, трёх уровней (схема, подготовка, функциональный) и обхода для Windows 2016 — в <a href="Windows-DC-%D1%80%D1%8F%D0%B4%D0%BE%D0%BC-%D1%81-Samba-DC.html">Windows DC рядом с Samba DC</a>; здесь — только шаги, специфичные для переезда. На Windows за всё это отвечает <code>adprep.exe</code>; сам adprep и новые способы его вызова против контроллера Samba не работают.</p>
+<ul>
+<li>Рекомендация вики для переезда с Windows на Samba: «If you are migrating from Windows to Samba, then we recommend that you use Windows adprep to upgrade your domain schema and preparation level to 2008 R2 before decommissioning your Windows DCs.» То есть схему и preparation level поднимают штатным Windows-инструментом <strong>до</strong> вывода Windows DC.</li>
+<li>Samba умеет обновлять схему только начиная с доменов 2008R2: «Samba only supports schema upgrades from 2008R2 domains onwards. If you originally created your domain using a Windows DC older than 2008R2, then samba-tool will not be able to upgrade your domain schema for you.»</li>
+<li>Если adprep нельзя запустить напрямую, используют обход через промежуточный Windows 2008 R2 DC: шаги (промежуточный DC → FSMO → Windows 2012 DC → adprep обновляет схему и подготовку) и требования к ролям — в <a href="Windows-DC-%D1%80%D1%8F%D0%B4%D0%BE%D0%BC-%D1%81-Samba-DC.html">Windows DC рядом с Samba DC</a>, см. также <a href="%D0%9F%D0%B5%D1%80%D0%B5%D0%B4%D0%B0%D1%87%D0%B0-%D0%B8-%D0%B7%D0%B0%D1%85%D0%B2%D0%B0%D1%82-FSMO-%D1%80%D0%BE%D0%BB%D0%B5%D0%B9.html">Передача и захват FSMO ролей</a>.</li>
+<li>Домен с функциональным уровнем 2012 и выше долгое время не принимал Samba DC — join падал с <code>WERR_DS_INCOMPATIBLE_VERSION</code>. Поддержка подтянулась: 4.19 заявляет FL 2012/2012_R2, 4.20 — FL 2016, 4.21 — «Samba can now claim Functional Level 2012R2 support» и gMSA «completing support for Functional Level 2012». Оговорки и обход, если уровень понизить нельзя, — в <a href="Windows-DC-%D1%80%D1%8F%D0%B4%D0%BE%D0%BC-%D1%81-Samba-DC.html">Windows DC рядом с Samba DC</a>; старая вики-страница (правка 13.04.2021) по-прежнему описывает FL 2012 и выше как неподдерживаемый — сверяйтесь с release notes своей версии.</li>
+<li>Смежное требование при переезде с домена, созданного ещё на Windows 2003 или раньше: у него должен быть доменно-интегрированный DNS, настроенный на поведение 2008; иначе присоединение Samba DC к домену не пройдёт.</li>
+<li>Полезно проверить домен на соответствие смешанной схеме заранее — см. <a href="Windows-DC-%D1%80%D1%8F%D0%B4%D0%BE%D0%BC-%D1%81-Samba-DC.html">Windows DC рядом с Samba DC</a>.</li>
+</ul>
+<h3>Функциональные уровни: что поднимать после миграции</h3>
+<p>classicupgrade провижинит домен с <code>dom_for_fun_level=dsdb.DS_DOMAIN_FUNCTION_2003</code> — и домен, и лес получают уровень 2003, поэтому перед вводом в строй уровень нужно осознанно поднять. Поддерживаемые уровни по версиям Samba (2003/2008/2008_R2 — с 4.0, 2012/2012_R2 — с 4.19, 2016 — с 4.20), таблица и полные оговорки — в <a href="Windows-DC-%D1%80%D1%8F%D0%B4%D0%BE%D0%BC-%D1%81-Samba-DC.html">Windows DC рядом с Samba DC</a>.</p>
+<ul>
+<li>Подъём выполняется командой <code>samba-tool domain level raise</code>, например <code># samba-tool domain level raise --domain-level=2008_R2</code>; после подъёма функционального уровня контроллеры Samba AD нужно перезапустить. Лес нельзя поставить выше домена. Последовательность для существующего домена по release notes 4.19 (<code>samba-tool domain schemaupgrade --schema=2019</code> → <code>samba-tool domain functionalprep --function-level=2016</code> → <code>samba-tool domain level raise --domain-level=2016 --forest-level=2016</code>) разобрана в <a href="Windows-DC-%D1%80%D1%8F%D0%B4%D0%BE%D0%BC-%D1%81-Samba-DC.html">Windows DC рядом с Samba DC</a>.</li>
+<li>Схема: до Samba 4.11 по умолчанию была 2008 R2, с 4.11 — 2012 R2 («Default AD schema changed from 2008_R2 to 2012_R2»). Для доменов, провижиненных до 4.11, схему поднимают <code>samba-tool domain schemaupgrade</code>; вики замечает, что инструмент может выдать ошибку на работающем сервере, хотя фактически сработает, и что команда есть начиная с 4.8, но сначала рекомендуется обновиться до Samba 4.11, так как в ней добавлены важные исправления.</li>
+<li>Новые домены: release notes 4.19 говорят, что база готовится под FL 2016 «with AD Schema 2019», а release notes 4.21 называют ту же схему «default 2016 schema» — формулировки источников расходятся. Фактическое умолчание <code>samba-tool domain provision</code> — <code>--base-schema=2019</code> и <code>--function-level=2008_R2</code> (проверено по исходнику тегов samba-4.19.0/4.20.0/4.21.0 и локально на 4.22.11), то есть база готовится под схему 2019, но функциональный уровень по умолчанию остаётся 2008 R2.</li>
+<li>Расхождение источников: вики-страница Windows 2012 Server compatibility (правка 2021) заявляет, что Samba «does not currently support any attempts to update the functional level» и что поднимать уровень надо средствами Windows. Нынешняя вики-страница Raising the Functional Levels (правка 2024) описывает подъём через <code>samba-tool domain level raise</code> и одновременно помечает подъём через оснастку Windows «Active Directory Domains and Trusts» как неподдерживаемый (ссылка на bug 10360). Для своей версии сверяйтесь с release notes.</li>
+<li>Имена опций — тоже источник путаницы: man-страница (<code>docs-xml/manpages/samba-tool.8.xml</code>, версия 4.25.0) в прозе пишет <code>--functional-level</code>, тогда как реально объявленная опция — <code>--function-level</code> (проверено на Samba 4.22.11). Пример вики для functionalprep использует именно <code>samba-tool domain functionalprep --function-level=[2012|2012_R2]</code>.</li>
+</ul>
+<h3>Проверено локально (Samba 4.22.11, Debian 13)</h3>
+<ul>
+<li><code>samba-tool --version</code> → <code>4.22.11-Debian-4.22.11+dfsg-0+deb13u1</code>.</li>
+<li><code>samba-tool domain classicupgrade --help</code> → есть <code>--dbdir=DIR</code>, <code>--testparm=PATH</code>, <code>--targetdir=DIR</code>, <code>-q/--quiet</code>, <code>-v/--verbose</code>, <code>--dns-backend=NAMESERVER-BACKEND</code> (<code>SAMBA_INTERNAL</code> описан как default), общие опции <code>--option=</code>, <code>--realm=REALM</code>; опций <code>--use-xattrs</code>/<code>--use-ntvfs</code> в этой сборке <strong>нет</strong>.</li>
+<li><code>python3 -c &quot;import samba; print(samba.is_ntvfs_fileserver_built())&quot;</code> → <code>False</code> — именно поэтому опции NTVFS/xattr не показываются (в коде они добавляются условно).</li>
+<li><code>samba-tool domain functionalprep --help</code> → опция называется <code>--function-level</code>, значения по умолчанию нет («Default is (Windows) 2016»).</li>
+<li><code>samba-tool domain level --help</code> → синтаксис <code>domain level (show|raise &lt;options&gt;)</code>, значения <code>--domain-level</code>/<code>--forest-level</code>: <code>2003 | 2008 | 2008_R2 | 2012 | 2012_R2 | 2016</code>.</li>
+</ul>
+<h2>Подводные камни</h2>
+<ul>
+<li>Миграция необратима: после первого обращения клиентов к AD DC возврат к NT4-домену невозможен даже откатом; обязательный прогон в изолированной сети.</li>
+<li>classicupgrade не «дополняет» существующий AD, а создаёт новый домен по старому SID; после него нельзя просто запустить provisioning «поверх».</li>
+<li>Аккаунт <code>administrator</code> обязан иметь RID 500, иначе ProvisioningError и остановка.</li>
+<li>Пользователи и группы с RID &lt; 1000 не переносятся (пропускаются как well-known) — RID надо менять заранее.</li>
+<li>Дубли SID (в том числе между пользователем и группой) и совпадение имён пользователя и группы останавливают апгрейд.</li>
+<li>«Сломанные» машинные аккаунты тоже останавливают апгрейд: если у аккаунта с флагами ACB_* не ровно один из ACB_NORMAL / ACB_WSTRUST / ACB_SVRTRUST / ACB_DOMTRUST, выводится «Failed to upgrade due to invalid account … Please fix this account before attempting to upgrade again». Часть некорректных комбинаций, наоборот, исправляется автоматически с предупреждениями (например, «Fixing account %s which had both ACB_NORMAL (U) and ACB_WSTRUST (W) set…»).</li>
+<li>BDC в NT4-домене перестаёт быть контроллером: его аккаунт понижается до машинного, и контроллер нужно потом поднимать через <code>samba-tool domain dcpromo</code>; доверия NT4 не переносятся и создаются заново как AD-доверия.</li>
+<li><code>realm</code> и имя AD-домена после миграции изменить нельзя — выбирайте сразу; имя DC (netbios name) должно совпадать с коротким hostname будущего сервера.</li>
+<li>DNS-бэкенд <code>NONE</code> при апгрейде не PDC/BDC подставляется кодом принудительно, а <code>BIND9_FLATFILE</code>/<code>NONE</code> в вики для этой процедуры вообще не описаны — используйте <code>SAMBA_INTERNAL</code> или <code>BIND9_DLZ</code> (см. <a href="%D0%92%D0%BD%D1%83%D1%82%D1%80%D0%B5%D0%BD%D0%BD%D0%B8%D0%B9-DNS-%D0%B1%D1%8D%D0%BA%D0%B5%D0%BD%D0%B4.html">Внутренний DNS бэкенд</a>, <a href="BIND9-DLZ-DNS-%D0%B1%D1%8D%D0%BA%D0%B5%D0%BD%D0%B4.html">BIND9 DLZ DNS бэкенд</a>).</li>
+<li>Опции <code>--use-xattrs</code>/<code>--use-ntvfs</code> существуют только в сборках с NTVFS; <code>--use-xattrs=no</code> без <code>--use-ntvfs</code> — ошибка (и это прямо помечено как «not supported for production use»).</li>
+<li>Для <code>ldapsam</code> нужен работающий LDAP-сервер и пароль привязки в <code>secrets.tdb</code>; при отсутствии — ошибка ProvisioningError. Плюс лимит выдачи поиска slapd по умолчанию 500 записей может обрезать миграцию.</li>
+<li><code>wins.dat</code> читается из <code>--dbdir</code>, хотя в списке переносимых файлов вики его нет: если WINS нужен, перенесите его сами, иначе будет лишь предупреждение.</li>
+<li>Не все атрибуты из LDAP переносятся (bug #9908), а определения шар из реестра не переносятся вовсе (в коде FIXME).</li>
+<li>После апгрейда нельзя добавлять в новый smb.conf строки <code>idmap config</code> и <code>vfs objects</code> — предупреждение вики; старые POSIX-идентификаторы уже лежат в AD как RFC2307-атрибуты, а на DC авто-включён <code>acl_xattr</code> (см. <a href="%D0%9E%D0%B1%D1%89%D0%B8%D0%B9-%D1%80%D0%B5%D1%81%D1%83%D1%80%D1%81-%D1%81-Windows-ACL.html">Общий ресурс с Windows ACL</a>).</li>
+<li>Старый <code>/etc/passwd</code> и <code>/etc/group</code> нужно чистить руками (для smbpasswd/tdbsam), а внешний LDAP — выключать; иначе легко получить два источника правды.</li>
+<li>Повторный запуск classicupgrade требует удалить сгенерированный smb.conf и содержимое <code>private/</code>.</li>
+<li>Новый домен после classicupgrade имеет функциональный уровень 2003 (и домен, и лес) — перед вводом в строй продумайте подъём уровня; допустимые уровни зависят от версии Samba (2012/2012_R2 — с 4.19, 2016 — с 4.20).</li>
+<li>Источники расходятся в вопросе подъёма функционального уровня (samba-tool против «только Windows») и в имени опции functionalprep (<code>--functional-level</code> в прозе man-страницы против <code>--function-level</code> в коде и в <code>--help</code>) — проверяйте <code>--help</code> своей версии.</li>
+</ul>
+<h2>Источники</h2>
+<ul>
+<li>https://wiki.samba.org/index.php/Migrating_a_Samba_NT4_Domain_to_Samba_AD_(Classic_Upgrade) — основная инструкция (последняя правка 18.07.2020): поддерживаемые passdb-бэкенды, необратимость, изолированная сеть, перенос tdb и smb.conf, точные команды <code>classicupgrade</code>, пример вывода, пост-миграционная зачистка, обходной путь для ldapsam, FAQ по дублям SID/RID, ошибка про Administrator -500, bug #9908.</li>
+<li>https://gitlab.com/samba-team/samba/-/blob/master/python/samba/netcmd/domain/classicupgrade.py — исходник команды: полный список опций (<code>--dbdir</code>, <code>--testparm</code>, <code>--targetdir</code>, <code>--dns-backend</code> с choices, <code>--use-xattrs</code>/<code>--use-ntvfs</code> только при сборке с NTVFS), проверки существования smb.conf/dbdir, подстановка путей из <code>--dbdir</code>, предупреждение при одновременном <code>--dbdir</code> и <code>--testparm</code>. Файл идентичен версии из ветки v4-21-stable (сравнено <code>diff</code>).</li>
+<li>https://gitlab.com/samba-team/samba/-/blob/master/python/samba/upgrade.py — движок миграции <code>upgrade_from_samba3</code>: что импортируется (account policy, groups, users, posix-атрибуты, WINS, idmap), пропуск RID &lt; 1000, пароль Administrator и требование RID -500, ошибки про дубли SID и общие имена, понижение BDC и пропуск доверий, <code>dom_for_fun_level=dsdb.DS_DOMAIN_FUNCTION_2003</code>, <code>use_rfc2307=True</code>, закомментированный <code>import_registry</code> (FIXME). Идентичен ветке v4-21-stable.</li>
+<li>https://www.samba.org/samba/docs/current/man-html/samba-tool.8.html — man-страница samba-tool (текст помечен «complete for version 4.25.0»): синтаксис <code>domain classicupgrade [options] classic_smb_conf</code>, описания <code>domain dcpromo</code>, <code>domain functionalprep</code>, <code>domain schemaupgrade</code>, <code>domain level show|raise</code>, общая опция <code>-r|--realm</code>.</li>
+<li>https://wiki.samba.org/index.php/Windows_2012_Server_compatibility — схема/preparation/функциональный уровень, adprep и его несовместимость с Samba, обходной путь с промежуточным Windows 2008R2 DC и переносом FSMO, таблица совместимости, ошибка <code>WERR_DS_INCOMPATIBLE_VERSION</code> при FL 2012+, рекомендация поднять схему и preparation level до 2008 R2 до вывода Windows DC (правка 13.04.2021).</li>
+<li>https://wiki.samba.org/index.php/Raising_the_Functional_Levels — таблица «функциональный уровень → версия Samba», <code>samba-tool domain level raise</code>, необходимость перезапуска DC после подъёма, неподдерживаемость подъёма через оснастку Windows (bug 10360), ограничение «лес не выше домена» (правка 14.06.2024).</li>
+<li>https://wiki.samba.org/index.php/Joining_a_Samba_DC_to_an_Existing_Active_Directory — требование к домену, созданному на Windows 2003 и раньше: доменно-интегрированный DNS с поведением 2008.</li>
+<li>https://www.samba.org/samba/history/samba-4.11.0.html — release notes 4.11: «Default AD schema changed from 2008_R2 to 2012_R2», обновление существующих установок через <code>samba-tool domain schemaupgrade</code>.</li>
+<li>https://www.samba.org/samba/history/samba-4.19.0.html — release notes 4.19: подготовка новых баз под FL 2016 и схему 2019 при сохранении FL 2008 R2 по умолчанию; последовательность <code>schemaupgrade</code> → <code>functionalprep</code> → <code>domain level raise</code>.</li>
+<li>https://www.samba.org/samba/history/samba-4.21.0.html — release notes 4.21: gMSA «completing support for Functional Level 2012»; «Samba can now claim Functional Level 2012R2 support»; формулировка «default 2016 schema» для новых доменов.</li>
+<li>https://gitlab.com/samba-team/samba/-/blob/samba-4.19.0/python/samba/netcmd/domain/provision.py (теги samba-4.19.0/4.20.0/4.21.0, файл один и тот же) — фактическое умолчание provision: <code>--base-schema</code> = 2019, <code>--function-level</code> = <code>2008_R2</code>.</li>
+<li>https://gitlab.com/samba-team/samba/-/raw/v4-21-stable/libds/common/flags.h — значения констант функциональных уровней (<code>DS_DOMAIN_FUNCTION_2003 = 2</code> и далее).</li>
+<li>https://gitlab.com/samba-team/samba/-/raw/v4-21-stable/python/samba/netcmd/domain/functional_prep.py и https://gitlab.com/samba-team/samba/-/raw/v4-21-stable/python/samba/netcmd/domain/schemaupgrade.py — объявленные имена и значения опций: <code>--function-level</code> (<code>2008_R2|2012|2012_R2|2016</code>) и <code>--schema</code> (<code>2012|2012_R2|2016|2019</code>, по умолчанию 2019).</li>
+<li>https://gitlab.com/samba-team/samba/-/raw/master/docs-xml/manpages/samba-tool.8.xml — исходник man-страницы: в прозе раздела functionalprep написано <code>--functional-level</code>, что расходится с именем реальной опции в коде.</li>
+<li>https://gitlab.com/samba-team/samba/-/raw/v4-21-stable/python/samba/provision/<strong>init</strong>.py — как используется <code>dom_for_fun_level</code>: по умолчанию <code>DS_DOMAIN_FUNCTION_2008_R2</code>, значение записывается и в <code>domainFunctionality</code>, и в <code>forestFunctionality</code>.</li>
+<li>https://bugzilla.samba.org/show_bug.cgi?id=9908 — трекер проблемы «не все LDAP-атрибуты переносятся»; номер и суть взяты из вики, сама страница bugzilla при проверке не открылась (HTTP 429).</li>
+<li>Локальная проверка на Debian 13: <code>samba-tool --version</code>, <code>samba-tool domain classicupgrade --help</code>, <code>samba-tool domain functionalprep --help</code>, <code>samba-tool domain level --help</code>, <code>python3 -c &quot;import samba; print(samba.is_ntvfs_fileserver_built())&quot;</code> (Samba 4.22.11).</li>
+<li>HTML-копии главных страниц: <code>assets/Миграция-NT4-домена-в-Samba-AD-1.html</code> (вики classicupgrade), <code>-2.html</code> (man samba-tool), <code>-3.html</code> (Windows 2012 Server compatibility), <code>-4.html</code> (Raising the Functional Levels), <code>-5.html</code> (release notes 4.19.0).</li>
+</ul>
+<h2>Связанные заметки</h2>
+<ul>
+<li><a href="%D0%A3%D1%81%D1%82%D0%B0%D0%BD%D0%BE%D0%B2%D0%BA%D0%B0-Samba-AD-DC.html">Установка Samba AD DC</a></li>
+<li><a href="Windows-DC-%D1%80%D1%8F%D0%B4%D0%BE%D0%BC-%D1%81-Samba-DC.html">Windows DC рядом с Samba DC</a></li>
+<li><a href="Idmap-%D0%B1%D1%8D%D0%BA%D0%B5%D0%BD%D0%B4%D1%8B-%D0%B8-RFC2307.html">Idmap бэкенды и RFC2307</a></li>
+<li><a href="%D0%9F%D0%B5%D1%80%D0%B5%D0%B4%D0%B0%D1%87%D0%B0-%D0%B8-%D0%B7%D0%B0%D1%85%D0%B2%D0%B0%D1%82-FSMO-%D1%80%D0%BE%D0%BB%D0%B5%D0%B9.html">Передача и захват FSMO ролей</a></li>
+<li><a href="%D0%A0%D0%B5%D0%B7%D0%B5%D1%80%D0%B2%D0%BD%D0%BE%D0%B5-%D0%BA%D0%BE%D0%BF%D0%B8%D1%80%D0%BE%D0%B2%D0%B0%D0%BD%D0%B8%D0%B5-%D0%B8-%D0%B2%D0%BE%D1%81%D1%81%D1%82%D0%B0%D0%BD%D0%BE%D0%B2%D0%BB%D0%B5%D0%BD%D0%B8%D0%B5-AD-DC.html">Резервное копирование и восстановление AD DC</a></li>
+<li><a href="%D0%94%D0%BE%D0%B2%D0%B5%D1%80%D0%B8%D1%82%D0%B5%D0%BB%D1%8C%D0%BD%D1%8B%D0%B5-%D0%BE%D1%82%D0%BD%D0%BE%D1%88%D0%B5%D0%BD%D0%B8%D1%8F-%D0%BC%D0%B5%D0%B6%D0%B4%D1%83-%D0%B4%D0%BE%D0%BC%D0%B5%D0%BD%D0%B0%D0%BC%D0%B8.html">Доверительные отношения между доменами</a></li>
+<li><a href="%D0%94%D0%B8%D1%81%D1%82%D1%80%D0%B8%D0%B1%D1%83%D1%82%D0%B8%D0%B2%D0%BD%D1%8B%D0%B5-%D0%BF%D0%B0%D0%BA%D0%B5%D1%82%D1%8B-Samba-AD-DC.html">Дистрибутивные пакеты Samba AD DC</a></li>
+</ul>
+</main>
+</body>
+</html>

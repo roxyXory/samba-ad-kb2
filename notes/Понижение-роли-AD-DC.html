@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Понижение роли Samba AD DC (Demoting a Samba AD DC)</title>
+<link rel="stylesheet" href="../style.css">
+</head>
+<body>
+<nav><a href="../index.html">База знаний Samba AD DC</a></nav>
+<main><h1>Понижение роли Samba AD DC (Demoting a Samba AD DC)</h1>
+<h2>Суть</h2>
+<p>Чтобы навсегда убрать контроллер домена из Active Directory, его нельзя просто удалить — DC нужно понизить (demote). Страница описывает две процедуры: понижение работающего (online) DC командой <code>samba-tool domain demote -Uadministrator</code> и удаление недоступного («мёртвого») DC без репликации командой <code>samba-tool domain demote --remove-other-dead-server=DC2</code>, выполняемой с оставшегося рабочего DC. Если DC не понижен корректно, AD становится нестабильным.</p>
+<h2>Ключевое</h2>
+<h3>Почему нельзя просто удалить DC</h3>
+<p>Удаление обычного члена домена сводится к удалению записи машинной учётной записи, но для DC требуется именно демоция. При некорректном удалении DC возможно:</p>
+<ul>
+<li>сбои репликации (replication failures);</li>
+<li>оставшиеся DC замедляются из-за таймаутов и неудачных попыток репликации;</li>
+<li>входы на членах домена заканчиваются ошибкой или выполняются дольше.</li>
+</ul>
+<h3>Понижение работающего (online) DC</h3>
+<p>Если понижаемый DC работает нормально:</p>
+<ol>
+<li>Войти локально на понижаемый DC.</li>
+<li>Убедиться, что служба <code>samba</code> запущена.</li>
+<li>Проверить, не владеет ли DC ролями FSMO. Если владеет — передать их другому DC (Transferring an FSMO Role).</li>
+<li>Опционально показать <code>objectGUID</code> DC (пример для хоста DC2):</li>
+</ol>
+<pre><code># ldbsearch -H /usr/local/samba/private/sam.ldb '(invocationId=*)' --cross-ncs objectguid | grep -A1 DC2
+dn: CN=NTDS Settings,CN=DC2,CN=Servers,CN=Default-First-Site-Name,CN=Sites,CN=Configuration,DC=samdom,DC=example,DC=com
+objectGUID: c14a774f-9732-4ec2-b9fa-2156c95c4e48
+</code></pre>
+<p>Имя хоста, IP-адрес и objectGUID нужны, чтобы после демоции проверить удаление всех DNS-записей.</p>
+<ol start="5">
+<li>Понизить DC:</li>
+</ol>
+<pre><code># samba-tool domain demote -Uadministrator
+Using DC1.samdom.example.com as partner server for the demotion
+Password for [SAMDOM\administrator]:
+Deactivating inbound replication
+Asking partner server DC1.samdom.example.com to synchronize from us
+Changing userControl and container
+Removing Sysvol reference: CN=DC2,CN=Enterprise,CN=Microsoft System Volumes,CN=System,CN=Configuration,DC=samdom,DC=example,DC=com
+Removing Sysvol reference: CN=DC2,CN=samdom.example.com,CN=Microsoft System Volumes,CN=System,CN=Configuration,DC=samdom,DC=example,DC=com
+Removing Sysvol reference: CN=DC2,CN=Domain System Volumes (SYSVOL share),CN=File Replication Service,CN=System,DC=samdom,DC=example,DC=com
+Removing Sysvol reference: CN=DC2,CN=Topology,CN=Domain System Volume,CN=DFSR-GlobalSettings,CN=System,DC=samdom,DC=example,DC=com
+Demote successful
+</code></pre>
+<ol start="6">
+<li>Остановить службу <code>samba</code>.</li>
+<li>Если DC использовал DNS-бэкенд BIND9_DLZ для зон Active Directory: остановить службу Bind9 и убедиться, что ни один член домена не использует этот хост для разрешения AD DNS-зон.</li>
+</ol>
+<h3>Понижение недоступного (offline) DC</h3>
+<p>При аппаратных сбоях и подобных ситуациях нужно убрать из домена недоступный DC. Демоция выполняется с оставшегося рабочего Samba DC.</p>
+<ol>
+<li>Войти на работающий Samba DC в лесу AD.</li>
+<li>Убедиться, что установлен Samba 4.4 или новее:</li>
+</ol>
+<pre><code># samba --version
+</code></pre>
+<ol start="3">
+<li>Проверить, что понижаемый удалённый DC не владеет ролями FSMO. Если владеет — захватить (seize) их на локальный DC.</li>
+<li>Убедиться, что понижаемый DC выключен.</li>
+<li>Опционально показать <code>objectGUID</code> DC (команда та же, что и для online-случая).</li>
+<li>Понизить удалённый DC (пример для DC2):</li>
+</ol>
+<pre><code># samba-tool domain demote --remove-other-dead-server=DC2
+Removing nTDSConnection: CN=04baf417-eb41-4f31-a5f1-c739f0e92b1b,CN=NTDS Settings,CN=DC1,CN=Servers,CN=Default-First-Site-Name,CN=Sites,CN=Configuration,DC=samdom,DC=example,DC=com
+Removing nTDSDSA: CN=NTDS Settings,CN=DC2,CN=Servers,CN=Default-First-Site-Name,CN=Sites,CN=Configuration,DC=samdom,DC=example,DC=com (and any children)
+Removing RID Set: CN=RID Set,CN=DC2,OU=Domain Controllers,DC=samdom,DC=example,DC=com
+Removing computer account: CN=DC2,OU=Domain Controllers,DC=samdom,DC=example,DC=com (and any child objects)
+Removing Samba-specific DNS service account: CN=dns-DC2,CN=Users,DC=samdom,DC=example,DC=com
+updating samdom.example.com keeping 3 values, removing 1 values
+...
+updating DC=c14a774f-9732-4ec2-b9fa-2156c95c4e48,DC=_msdcs.samdom.example.com,CN=MicrosoftDNS,DC=ForestDnsZones,DC=samdom,DC=example,DC=com keeping 0 values, removing 1 values
+...
+Removing Sysvol reference: CN=DC2,CN=Topology,CN=Domain System Volume,CN=DFSR-GlobalSettings,CN=System,DC=samdom,DC=example,DC=com
+</code></pre>
+<p>(в выводе многоточием пропущены однотипные строки <code>updating DC=...</code> — утилита удаляет записи DC из зон DomainDnsZones и ForestDnsZones)</p>
+<ol start="7">
+<li>Если пониженный DC обслуживал DNS для зон AD — убедиться, что члены домена и DC больше не используют этот хост для разрешения AD DNS-зон.</li>
+</ol>
+<h3>Проверка понижения (Verifying the Demotion)</h3>
+<p>Ручная проверка, что DC успешно понижен (и ручная зачистка остатков, если официальный процесс не сработал):</p>
+<ol>
+<li>Войти на член домена Windows под учётной записью из группы Domain Admins (например, администратор домена AD).</li>
+<li>Установить Remote Server Administration Tools (RSAT).</li>
+<li>В приложении <strong>Active Directory Users and Computers</strong> перейти в контейнер Domain Controllers и убедиться, что пониженный DC удалён. Если запись осталась — удалить вручную: правый клик на записи DC → <strong>Delete</strong> → <strong>Yes</strong> → выбрать «Delete this Domain Controller anyway. It is permanently offline and can no longer be removed using the removal wizard.» → <strong>OK</strong>; если DC является сервером глобального каталога — подтвердить <strong>Yes</strong>.</li>
+<li>В <strong>Active Directory Sites and Services</strong> убедиться, что пониженный DC не значится ни в одной записи сайта AD; если значится — правый клик → <strong>Delete</strong> → <strong>Yes</strong>.</li>
+<li>В приложении <strong>DNS</strong> убедиться, что имя хоста, IP-адрес и objectGUID DC больше не встречаются ни в одной DNS-записи ни в одной зоне AD DNS; лишние записи удалить вручную (правый клик → <strong>Delete</strong> → <strong>Yes</strong>).</li>
+</ol>
+<h2>Подводные камни</h2>
+<ul>
+<li>Процедуру <code>--remove-other-dead-server</code> запускать только если DC больше не подключён к AD и его нельзя понизить обычным способом. Иначе изменения (например, смены паролей) не будут реплицированы на другой DC и будут потеряны; список расхождений можно получить командой <code>samba-tool ldapcmp</code>.</li>
+<li>Нельзя понизить offline-удалённый DC с DC, работающего на Samba 4.4 или старее — сначала обновитесь до Samba 4.4.0 или новее.</li>
+<li>Никогда не подключайте удалённо пониженный (remotely demoted) DC обратно к сети — AD может стать неконсистентным.</li>
+<li>Шаги из раздела проверки не заменяют официальные процедуры демоции: они нужны только для проверки и ручного удаления остаточных записей, если официальный процесс понижения завершился неудачей.</li>
+<li>Перед понижением разберитесь с FSMO: на работающем DC роли передают (transfer), у выключенного — захватывают (seize) на другой DC.</li>
+</ul>
+<h2>Связанные заметки</h2>
+<ul>
+<li><a href="%D0%9F%D0%B5%D1%80%D0%B5%D0%B4%D0%B0%D1%87%D0%B0-%D0%B8-%D0%B7%D0%B0%D1%85%D0%B2%D0%B0%D1%82-FSMO-%D1%80%D0%BE%D0%BB%D0%B5%D0%B9.html">Передача и захват FSMO ролей</a></li>
+<li><a href="%D0%9F%D1%80%D0%B8%D1%81%D0%BE%D0%B5%D0%B4%D0%B8%D0%BD%D0%B5%D0%BD%D0%B8%D0%B5-%D0%B2%D1%82%D0%BE%D1%80%D0%BE%D0%B3%D0%BE-DC-%D0%BA-%D0%B4%D0%BE%D0%BC%D0%B5%D0%BD%D1%83.html">Присоединение второго DC к домену</a></li>
+<li><a href="%D0%A3%D0%BF%D1%80%D0%B0%D0%B2%D0%BB%D0%B5%D0%BD%D0%B8%D0%B5-%D1%81%D0%BB%D1%83%D0%B6%D0%B1%D0%BE%D0%B9-AD-DC.html">Управление службой AD DC</a></li>
+<li><a href="%D0%94%D0%B8%D0%B0%D0%B3%D0%BD%D0%BE%D1%81%D1%82%D0%B8%D0%BA%D0%B0-AD-DC.html">Диагностика AD DC</a></li>
+</ul>
+</main>
+</body>
+</html>

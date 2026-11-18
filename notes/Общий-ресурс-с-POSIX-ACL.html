@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Общий ресурс с POSIX ACL</title>
+<link rel="stylesheet" href="../style.css">
+</head>
+<body>
+<nav><a href="../index.html">База знаний Samba AD DC</a></nav>
+<main><h1>Общий ресурс с POSIX ACL</h1>
+<h2>Суть</h2>
+<p>Страница описывает создание общего файлового ресурса Samba с правами доступа на основе POSIX ACL, которые управляются локально на хосте утилитами UNIX (<code>chmod</code>, <code>chown</code>, <code>setfacl</code>). Такие ресурсы поддерживаются на членах домена, NT4 PDC/BDC и автономных серверах, но <strong>не</strong> поддерживаются на Samba AD DC — там обязаны использоваться Windows ACL. На Linux доступны только «устаревшие, но всё ещё применяемые» POSIX draft ACLs, поэтому для тонкой настройки прав рекомендуется вариант с Windows ACL.</p>
+<h2>Ключевое</h2>
+<ul>
+<li>Samba поддерживает ресурсы с файловыми ACL на: членах домена, NT4 PDC и BDC, автономных серверах.</li>
+<li>На контроллере домена (AD DC) поддержка Windows ACL включена глобально, поэтому ресурсы с POSIX ACL не поддерживаются — нужно использовать Windows ACL.</li>
+<li>Файловая система должна поддерживать расширенные атрибуты. С ними можно использовать NFS4 ACLs; в Linux NFS4 ACL обычно нет и доступны только POSIX draft ACLs с режимами: None, Read, Write, Full control.</li>
+<li>Перед созданием ресурса должен быть настроен сам Samba (член домена, NT4 PDC, NT4 BDC или автономный сервер).</li>
+</ul>
+<h3>Разрешение запуска файлов</h3>
+<p>По умолчанию пользователи могут запускать файлы (например, <code>*.exe</code>, <code>*.bat</code>) на ресурсе только при установленном POSIX x-бите. Чтобы разрешить выполнение всех файлов независимо от x-бита, задайте в секции <code>[global]</code> или конкретного ресурса <code>smb.conf</code>:</p>
+<pre><code>acl allow execute always = yes
+</code></pre>
+<h3>Добавление ресурса</h3>
+<p>Создать каталог:</p>
+<pre><code># mkdir -p /srv/samba/Demo/
+</code></pre>
+<p>Добавить определение ресурса <code>[Demo]</code> в <code>smb.conf</code>:</p>
+<pre><code>[Demo]
+ path = /srv/samba/Demo/
+ read only = no
+</code></pre>
+<p>Это минимально необходимые параметры записываемого ресурса. Перечитать конфигурацию Samba:</p>
+<pre><code># smbcontrol all reload-config
+</code></pre>
+<h3>Стандартные права UNIX</h3>
+<p>Классические права UNIX задают доступ для одного владельца, одной группы и всех остальных (other). Для владельца <code>root</code> и группы <code>Domain Users</code> с чтением/записью и запретом остальным:</p>
+<pre><code># chmod 2770 /srv/samba/Demo/
+# chown root:&quot;Domain Users&quot; /srv/samba/Demo/
+</code></pre>
+<p>Бит SGID (2770) автоматически наследует группу каталога всем новым файлам и каталогам вместо основной группы пользователя.</p>
+<h3>Расширенные ACL (Extended ACLs)</h3>
+<p>Добавить параметры <code>inherit acls = yes</code> и <code>map acl inherit = yes</code> в конфигурацию ресурса (они влияют на наследование расширенных ACL):</p>
+<pre><code>[Demo]
+ path = /srv/samba/Demo/
+ read only = no
+ map acl inherit = yes
+ inherit acls = yes
+</code></pre>
+<p>Перезагрузить Samba:</p>
+<pre><code># smbcontrol all reload-config
+</code></pre>
+<p>Проверить, что каталог лежит на файловой системе с поддержкой расширенных ACL (см. File System Support в вики).</p>
+<p>Отключить автоматическую выдачу прав основной группе учётных записей:</p>
+<pre><code># setfacl -m group::--- /srv/samba/Demo/
+# setfacl -m default:group::--- /srv/samba/Demo/
+</code></pre>
+<p>Задать права на каталог — чтение/запись/выполнение для <code>Domain Admins</code>, чтение/выполнение для <code>Domain Users</code>, запрет остальным:</p>
+<pre><code># setfacl -m group:&quot;SAMDOM\Domain Admins&quot;:rwx /srv/samba/Demo/
+# setfacl -m group:&quot;SAMDOM\Domain Users&quot;:r-x /srv/samba/Demo/
+# setfacl -R -m other::--- /srv/samba/Demo/
+</code></pre>
+<p>Эти настройки применяются только к самому каталогу (в Windows — «This folder only»). Чтобы те же права наследовались новым объектам файловой системы:</p>
+<pre><code># setfacl -m default:group:&quot;SAMDOM\Domain Admins&quot;:rwx /srv/samba/Demo/
+# setfacl -m default:group:&quot;SAMDOM\Domain Users&quot;:r-x /srv/samba/Demo/
+# setfacl -m default:other::--- /srv/samba/Demo/
+</code></pre>
+<p>После этого режим для субъектов меняется с «This folder only» на «This folder, subfolders, and files».</p>
+<h3>Соответствие Windows ACL</h3>
+<p>Заданные POSIX ACL отображаются в следующие Windows ACL:</p>
+<table>
+<thead>
+<tr>
+<th>Субъект</th>
+<th>Доступ</th>
+<th>Применяется к</th>
+<th>Комментарий</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>SAMDOM\Domain Admins</td>
+<td>Full control</td>
+<td>This folder, subfolders, and files</td>
+<td></td>
+</tr>
+<tr>
+<td>SAMDOM\Domain Users</td>
+<td>Read &amp; execute</td>
+<td>This folder, subfolders, and files</td>
+<td></td>
+</tr>
+<tr>
+<td>Everyone</td>
+<td>None</td>
+<td>This folder, subfolders, and files</td>
+<td>Samba отображает сюда запись UNIX other.</td>
+</tr>
+<tr>
+<td>directory_owner (Unix User\directory_owner) *</td>
+<td>Full control</td>
+<td>This folder only</td>
+<td>Samba отображает владельца каталога.</td>
+</tr>
+<tr>
+<td>directory_primary_group (Unix User\directory_primary_group) *</td>
+<td>None</td>
+<td>This folder only</td>
+<td>Samba отображает основную группу каталога.</td>
+</tr>
+<tr>
+<td>CREATOR OWNER *</td>
+<td>Full control</td>
+<td>Subfolders and files only</td>
+<td>Создатель автоматически наследует эти права на новых объектах.</td>
+</tr>
+<tr>
+<td>CREATOR GROUP *</td>
+<td>None</td>
+<td>Subfolders and files only</td>
+<td>Основная группа создателя автоматически наследует эти права на новых объектах.</td>
+</tr>
+</tbody>
+</table>
+<h3>Права доступа к ресурсу (share permissions)</h3>
+<p>Доступ на основе пользователей и групп — членам <code>Domain Users</code> доступ разрешён, учётной записи <code>example_user</code> запрещён:</p>
+<pre><code> valid users = +SAMDOM\&quot;Domain Users&quot;
+ invalid users = SAMDOM\example_user
+</code></pre>
+<p>Параметр <code>invalid users</code> имеет более высокий приоритет, чем <code>valid users</code>.</p>
+<p>Доступ на основе хостов — по имени хоста, IP-адресу или диапазону IP:</p>
+<pre><code> hosts allow = 127.0.0.1 10.99.0.0/24 GoodHost
+ hosts deny = BadHost
+</code></pre>
+<p>Параметр <code>hosts deny</code> имеет более высокий приоритет, чем <code>hosts allow</code>.</p>
+<h2>Подводные камни</h2>
+<ul>
+<li>На Samba AD DC ресурсы с POSIX ACL <strong>не поддерживаются</strong>: поддержка Windows ACL на DC включена глобально, использовать нужно Windows ACL.</li>
+<li>Основная группа каталога дополнительно отображается на динамический субъект CREATOR GROUP; при использовании POSIX draft ACL этот субъект добавляется автоматически, и удалить его нельзя.</li>
+<li>Настроить или убрать из ACL субъекты, отмеченные звёздочкой в таблице соответствия (directory_owner, directory_primary_group, CREATOR OWNER, CREATOR GROUP), можно только при использовании Windows ACL.</li>
+<li>POSIX draft ACLs в Linux ограничены режимами None, Read, Write, Full control и считаются менее точными, чем Windows/NFS4 ACL; рекомендация вики — запускать файловый сервер Samba на системе с NFS4 ACL, а для тонкой granular-настройки — использовать Windows ACL.</li>
+<li>Команды <code>setfacl</code> без префикса <code>default:</code> задают права только на сам каталог («This folder only»); для наследования новыми объектами нужны отдельные записи <code>default:</code>.</li>
+<li>Если нужен запуск всех файлов на ресурсе независимо от x-бита, требуется <code>acl allow execute always = yes</code> — по умолчанию исполняемы только файлы с установленным x-битом.</li>
+</ul>
+<h2>Связанные заметки</h2>
+<ul>
+<li><a href="%D0%9E%D0%B1%D1%89%D0%B8%D0%B9-%D1%80%D0%B5%D1%81%D1%83%D1%80%D1%81-%D1%81-Windows-ACL.html">Общий ресурс с Windows ACL</a></li>
+<li><a href="Samba-%D0%BA%D0%B0%D0%BA-%D1%87%D0%BB%D0%B5%D0%BD-%D0%B4%D0%BE%D0%BC%D0%B5%D0%BD%D0%B0.html">Samba как член домена</a></li>
+<li><a href="%D0%A3%D1%81%D1%82%D0%B0%D0%BD%D0%BE%D0%B2%D0%BA%D0%B0-Samba-AD-DC.html">Установка Samba AD DC</a></li>
+<li><a href="FAQ-Samba.html">FAQ Samba</a></li>
+</ul>
+</main>
+</body>
+</html>

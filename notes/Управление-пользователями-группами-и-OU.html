@@ -1,0 +1,284 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Управление пользователями, группами и OU через samba-tool</title>
+<link rel="stylesheet" href="../style.css">
+</head>
+<body>
+<nav><a href="../index.html">База знаний Samba AD DC</a></nav>
+<main><h1>Управление пользователями, группами и OU через samba-tool</h1>
+<h2>Суть</h2>
+<p><code>samba-tool</code> — штатная утилита администрирования Samba AD DC: пользователи, группы, организационные подразделения (OU), компьютеры, делегирование Kerberos и парольные политики. Работает в двух режимах: <strong>локально на контроллере домена</strong> (читает и пишет <code>sam.ldb</code> напрямую, нужны права root, логин не требуется) и <strong>удалённо по LDAP</strong> (<code>-H ldap://dc1.samdom.example.com -U 'SAMDOM\administrator'</code>, пароль спросится интерактивно). Все команды и опции ниже сверены с установленной Samba <strong>4.22.11</strong> — на других версиях сверяйтесь с <code>samba-tool &lt;раздел&gt; &lt;подкоманда&gt; --help</code>.</p>
+<h2>Общие принципы и опции</h2>
+<ul>
+<li><strong>Короткие DN.</strong> Там, где команда принимает DN OU (<code>--userou</code>, <code>--groupou</code>, <code>--computerou</code>, <code>listobjects</code>), достаточно короткой формы <code>'OU=Отделы'</code> — DN домена подставляется автоматически. Для <code>move</code>/<code>rename</code> указывайте полный DN родителя.</li>
+<li><strong>Базовый DN для списков.</strong> У <code>user list</code>, <code>group list</code>, <code>user show</code> и т.п. есть <code>-b/--base-dn</code>, чтобы ограничить выборку подразделением.</li>
+<li><strong>Фильтры.</strong> Многие команды принимают вместо имени <code>--filter &lt;LDAP-фильтр&gt;</code> — операция применится ко всем совпавшим объектам (осторожно!).</li>
+<li><strong>Формат вывода.</strong> <code>--full-dn</code> — полный DN; <code>--hide-disabled</code>, <code>--hide-expired</code>, <code>--locked-only</code> — фильтры учётных записей.</li>
+<li><strong>Справка.</strong> <code>samba-tool user --help</code> — список подкоманд; <code>samba-tool user create --help</code> — все опции.</li>
+<li><strong>Пароли в скриптах.</strong> Не передавайте <code>--password</code> в командной строке (виден в <code>ps</code>); используйте интерактивный ввод или переменные <code>PASSWD</code> / <code>PASSWD_FD</code> / <code>PASSWD_FILE</code> (см. <a href="%D0%9C%D0%BE%D0%BD%D0%B8%D1%82%D0%BE%D1%80%D0%B8%D0%BD%D0%B3-%D0%B8-%D0%B0%D0%B2%D1%82%D0%BE%D0%BC%D0%B0%D1%82%D0%B8%D0%B7%D0%B0%D1%86%D0%B8%D1%8F-Samba-AD-DC.html">Мониторинг и автоматизация Samba AD DC</a>).</li>
+</ul>
+<h2>Пользователи — <code>samba-tool user</code></h2>
+<p>Полный список подкоманд: <code>add</code>, <code>addunixattrs</code>, <code>auth</code>, <code>create</code>, <code>delete</code>, <code>disable</code>, <code>edit</code>, <code>enable</code>, <code>get-kerberos-ticket</code>, <code>getgroups</code>, <code>getpassword</code>, <code>list</code>, <code>move</code>, <code>password</code>, <code>rename</code>, <code>sensitive</code>, <code>setexpiry</code>, <code>setpassword</code>, <code>setprimarygroup</code>, <code>show</code>, <code>syncpasswords</code>, <code>unlock</code>.</p>
+<h3>Создание и удаление</h3>
+<pre><code># samba-tool user create ivanov 'Str0ng!Passw0rd' \
+    --given-name=Иван --surname=Иванов \
+    --userou='OU=Отделы' --mail-address=ivanov@example.com
+
+# samba-tool user add petrov 'Str0ng!Passw0rd'    # синоним create
+# samba-tool user delete petrov
+</code></pre>
+<p>Ключевые опции <code>create</code>/<code>add</code> (проверено по help): <code>--must-change-at-next-login</code>, <code>--random-password</code> (пароль не указывается), <code>--smartcard-required</code>, <code>--use-username-as-cn</code>, <code>--userou=</code>, <code>--given-name=</code>, <code>--surname=</code>, <code>--initials=</code>, <code>--profile-path=</code>, <code>--script-path=</code>, <code>--home-drive=</code>, <code>--home-directory=</code>.</p>
+<h3>Просмотр и выборки</h3>
+<pre><code># samba-tool user list
+# samba-tool user list --full-dn --hide-disabled
+# samba-tool user list -b 'OU=Отделы'
+# samba-tool user show ivanov
+# samba-tool user getgroups ivanov          # прямые группы пользователя
+</code></pre>
+<h3>Изменение и перемещение</h3>
+<pre><code># samba-tool user edit ivanov               # открывает редактор AD-объекта
+# samba-tool user move ivanov 'OU=IT,DC=samdom,DC=example,DC=com'
+# samba-tool user rename ivanov             # переименование (CN и связанные атрибуты)
+</code></pre>
+<h3>Включение, блокировка, срок действия</h3>
+<pre><code># samba-tool user disable ivanov
+# samba-tool user enable ivanov
+# samba-tool user unlock ivanov
+# samba-tool user setexpiry ivanov --days=90
+# samba-tool user setexpiry ivanov --noexpiry
+# samba-tool user disable --filter '(description=temp-*)'   # массово, осторожно
+</code></pre>
+<h3>Пароли</h3>
+<pre><code># samba-tool user setpassword ivanov        # задать/сбросить пароль (запросит)
+# samba-tool user password                  # сменить СВОЙ пароль
+# samba-tool user getpassword ivanov --attributes=virtualClearTextUTF8
+# samba-tool user getpassword ivanov --attributes=virtualCryptSHA512
+</code></pre>
+<p><code>getpassword</code> умеет виртуальные атрибуты: <code>unicodePwd</code>, <code>virtualClearTextUTF16</code>, <code>virtualClearTextUTF8</code>, <code>virtualCryptSHA256</code>, <code>virtualCryptSHA512</code>, <code>virtualKerberosSalt</code>, <code>virtualSSHA</code>, <code>virtualSambaGPG</code>, <code>virtualWDigest01..29</code>; есть <code>--decrypt-samba-gpg</code> (только если SambaGPG-пароль сохранён).</p>
+<h3>Unix-атрибуты (RFC2307)</h3>
+<pre><code># samba-tool user addunixattrs ivanov 10001 \
+    --gid-number=10001 --login-shell=/bin/bash \
+    --unix-home=/home/ivanov --gecos='Иван Иванов'
+</code></pre>
+<p>Требуются NIS-расширения схемы (<code>--use-rfc2307</code> при provision) и idmap-бэкенд <code>ad</code> на членах домена — см. <a href="Idmap-%D0%B1%D1%8D%D0%BA%D0%B5%D0%BD%D0%B4%D1%8B-%D0%B8-RFC2307.html">Idmap бэкенды и RFC2307</a>.</p>
+<h3>Прочее</h3>
+<pre><code># samba-tool user sensitive ivanov show|on|off   # флаг UF_NOT_DELEGATED
+# samba-tool user setprimarygroup ivanov 'Domain Users'
+# samba-tool user syncpasswords --cache-ldb-initialize
+# samba-tool user get-kerberos-ticket ivanov
+# samba-tool user auth policy|silo                # аутентификационные политики/силосы
+</code></pre>
+<h2>Группы — <code>samba-tool group</code></h2>
+<p>Подкоманды: <code>add</code>, <code>addmembers</code>, <code>addunixattrs</code>, <code>create</code>, <code>delete</code>, <code>edit</code>, <code>list</code>, <code>listmembers</code>, <code>move</code>, <code>removemembers</code>, <code>rename</code>, <code>show</code>, <code>stats</code>.</p>
+<h3>Создание</h3>
+<pre><code># samba-tool group add it --group-scope=Global --group-type=Security \
+    --description='Отдел ИТ' --groupou='OU=Отделы'
+# samba-tool group add projects --group-scope=Universal --group-type=Distribution
+</code></pre>
+<p>Опции <code>add</code>/<code>create</code>: <code>--group-scope</code> (<code>Domain | Global | Universal</code>), <code>--group-type</code> (<code>Security | Distribution</code>), <code>--groupou=</code>, <code>--description=</code>, <code>--mail-address=</code>, <code>--notes=</code>, <code>--gid-number=</code>, <code>--nis-domain=</code>, <code>--special</code> (предопределённая группа).</p>
+<h3>Состав и статистика</h3>
+<pre><code># samba-tool group list
+# samba-tool group list -v                     # тип и область группы
+# samba-tool group listmembers it --full-dn
+# samba-tool group listmembers it --hide-disabled --hide-expired
+# samba-tool group addmembers it ivanov,petrov
+# samba-tool group addmembers it --member-dn='CN=ivanov,OU=Отделы,DC=...'
+# samba-tool group removemembers it petrov
+# samba-tool group stats                       # сводная статистика членства
+</code></pre>
+<h3>Изменение и перемещение</h3>
+<pre><code># samba-tool group show it
+# samba-tool group edit it
+# samba-tool group move it 'OU=IT,DC=samdom,DC=example,DC=com'
+# samba-tool group rename it
+# samba-tool group delete it
+# samba-tool group addunixattrs it 10001
+</code></pre>
+<h2>Организационные подразделения — <code>samba-tool ou</code></h2>
+<p>Подкоманды: <code>add</code>, <code>create</code>, <code>delete</code>, <code>list</code>, <code>listobjects</code>, <code>move</code>, <code>rename</code>.</p>
+<pre><code># samba-tool ou add 'OU=Отделы' --description='Подразделения организации'
+# samba-tool ou list
+# samba-tool ou move 'OU=Отделы' 'OU=Company,DC=samdom,DC=example,DC=com'
+# samba-tool ou rename 'OU=Отделы' 'OU=Departments,DC=samdom,DC=example,DC=com'
+# samba-tool ou delete 'OU=Отделы'
+</code></pre>
+<h3><code>ou listobjects</code> — содержимое OU</h3>
+<pre><code># samba-tool ou listobjects 'OU=MiniNode1' --full-dn -H ldap://127.0.0.1 -U 'STAND\mininode2admin'
+</code></pre>
+<ul>
+<li>Выводит объекты OU: пользователи, группы, компьютеры, вложенные OU (фильтр <code>(objectclass=*)</code>, только DN, сортировка).</li>
+<li><strong>По умолчанию — <code>SCOPE_ONELEVEL</code>: только прямые дети.</strong> Рекурсивно по поддереву — флаг <code>-r/--recursive</code> (внутри исходник включает и вложенные объекты; пустой результат при <code>-r</code> даёт <code>ou &quot;...&quot; is empty</code>).</li>
+<li>Короткое имя <code>'OU=MiniNode1'</code> автоматически дополняется DN домена (<code>normalize_dn_in_domain</code>).</li>
+<li><code>--full-dn</code> печатает полный DN. Без флага из DN вырезается <strong>суффикс домена</strong> (<code>DC=...</code>), то есть вывод будет вида <code>CN=ivanov,OU=MiniNode1</code> — это не «относительный RDN», а DN без <code>DC</code>-части.</li>
+<li>Сам OU в список не попадает; пустой OU → <code>ou &quot;OU=MiniNode1&quot; is empty</code>.</li>
+</ul>
+<h2>Компьютеры — <code>samba-tool computer</code></h2>
+<p>Подкоманды: <code>add</code>, <code>create</code>, <code>delete</code>, <code>edit</code>, <code>list</code>, <code>move</code>, <code>show</code>.</p>
+<pre><code># samba-tool computer add WS01 --computerou='OU=Рабочие станции' \
+    --description='Рабочая станция бухгалтерии' \
+    --ip-address=10.99.0.51 --service-principal-name='HOST/ws01'
+
+# samba-tool computer list --hide-disabled
+# samba-tool computer show WS01
+# samba-tool computer move WS01 'OU=Серверы,DC=samdom,DC=example,DC=com'
+# samba-tool computer delete WS01
+</code></pre>
+<p><code>--ip-address</code> и <code>--service-principal-name</code> можно повторять; <code>--prepare-oldjoin</code> — подготовка учётной записи для старого механизма join.</p>
+<h2>Делегирование Kerberos — <code>samba-tool delegation</code></h2>
+<pre><code># samba-tool delegation show ivanov
+# samba-tool delegation for-any-service ivanov on     # UF_TRUSTED_FOR_DELEGATION
+# samba-tool delegation for-any-protocol ivanov on    # UF_TRUSTED_TO_AUTHENTICATE_FOR_DELEGATION (S4U2Proxy)
+# samba-tool delegation add-service svc_web 'HTTP/websrv.samdom.example.com'
+# samba-tool delegation add-principal svc_web 'SAMDOM\svc_sql'   # RBCD
+</code></pre>
+<ul>
+<li><code>add-service</code>/<code>del-service</code> меняют <code>msDS-AllowedToDelegateTo</code> (обычное ограниченное делегирование).</li>
+<li><code>add-principal</code>/<code>del-principal</code> меняют <code>msDS-AllowedToActOnBehalfOfOtherIdentity</code> (resource-based constrained delegation).</li>
+<li><code>on|off</code> включает/снимает флаги учётной записи.</li>
+</ul>
+<h2>Права на объекты каталога — <code>samba-tool dsacl</code></h2>
+<p>Это права <strong>в AD на объекты каталога</strong> (пользователи, группы, OU, компьютеры), а не файловые ACL шар. Хранятся в атрибуте <code>nTSecurityDescriptor</code> самого объекта и реплицируются как обычные данные AD.</p>
+<pre><code># посмотреть текущий дескриптор (SDDL)
+samba-tool dsacl get --objectdn=&quot;OU=MiniNode1,DC=stand,DC=local&quot;
+
+# добавить ACE (команда ДОБАВЛЯЕТ запись, а не заменяет дескриптор)
+samba-tool dsacl set --objectdn=&quot;OU=MiniNode1,DC=stand,DC=local&quot; \
+  --sddl=&quot;(A;;CCDCLCRPLORC;;;S-1-5-11)&quot;
+
+# удалить конкретный ACE
+samba-tool dsacl delete --objectdn=&quot;OU=MiniNode1,DC=stand,DC=local&quot; \
+  --sddl=&quot;(A;;CCDCLCRPLORC;;;S-1-5-11)&quot;
+</code></pre>
+<ul>
+<li><code>set</code> печатает старый и новый дескриптор, предупреждает, если такой ACE уже есть, и игнорирует наследуемые ACE; удалённо — <code>-H ldap://dc1... -U 'STAND\administrator'</code>.</li>
+<li>Альтернативный режим без <code>--sddl</code>: <code>--trusteedn=&lt;DN&gt; --action=allow|deny --car=&lt;право&gt;</code> — строит ACE для control access right: <code>change-rid</code>, <code>change-pdc</code>, <code>change-infrastructure</code>, <code>change-schema</code>, <code>change-naming</code>, <code>allocate_rids</code>, <code>get-changes</code>, <code>get-changes-all</code>, <code>get-changes-filtered</code>, <code>topology-manage</code>, <code>topology-monitor</code>, <code>repl-sync</code>, <code>ro-repl-secret-sync</code> (получится <code>(OA;;CR;&lt;GUID&gt;;;&lt;SID&gt;)</code> для allow или <code>(OD;;CR;...)</code> для deny).</li>
+</ul>
+<h3>Разбор SDDL <code>(A;;CCDCLCRPLORC;;;SID)</code></h3>
+<p>Формат ACE: <code>(Тип;Флаги;Права;GUID_объекта;GUID_наследования;SID)</code>.</p>
+<ul>
+<li><code>A</code> — allow (есть также <code>D</code> — deny, <code>OA</code>/<code>OD</code> — object allow/deny для extended rights);</li>
+<li>флаги пусты → ACE действует <strong>только на сам объект</strong>, без наследования на дочерние (<code>CI</code> — контейнеры, <code>OI</code> — объекты, <code>NP</code> — без распространения, <code>IO</code> — наследуемый);</li>
+<li><code>CCDCLCRPLORC</code> — маска прав (сумма <code>0x00020097</code>):</li>
+</ul>
+<table>
+<thead>
+<tr>
+<th>Код</th>
+<th>Право</th>
+<th>Смысл</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>CC</code></td>
+<td>CREATE_CHILD (0x1)</td>
+<td>создавать дочерние объекты в этом объекте</td>
+</tr>
+<tr>
+<td><code>DC</code></td>
+<td>DELETE_CHILD (0x2)</td>
+<td>удалять дочерние объекты</td>
+</tr>
+<tr>
+<td><code>LC</code></td>
+<td>LIST_CHILDREN (0x4)</td>
+<td>видеть список дочерних объектов</td>
+</tr>
+<tr>
+<td><code>RP</code></td>
+<td>READ_PROP (0x10)</td>
+<td>читать атрибуты объекта</td>
+</tr>
+<tr>
+<td><code>LO</code></td>
+<td>LIST_OBJECT (0x80)</td>
+<td>право «перечисления объекта» (проверка доступа)</td>
+</tr>
+<tr>
+<td><code>RC</code></td>
+<td>READ_CONTROL (0x20000)</td>
+<td>читать сам дескриптор безопасности</td>
+</tr>
+</tbody>
+</table>
+<p>Другие полезные коды: <code>WP</code> (запись атрибутов), <code>DT</code> (удалить поддерево), <code>CR</code> (control access / extended right), <code>SD</code> (удалить объект), <code>WD</code> (менять DACL), <code>WO</code> (менять владельца), <code>GA/GR/GW/GX</code> (generic all/read/write/execute).</p>
+<p><strong>Что даёт эта конкретная ACE:</strong> доверенное лицо (SID) может в указанном объекте (обычно OU) <strong>создавать и удалять дочерние объекты</strong> (например, пользователей или компьютеры), видеть их список и читать атрибуты и дескриптор — но не может менять атрибуты существующих объектов (<code>WP</code> нет), удалить сам объект (<code>SD</code> нет) или изменить его права (<code>WD</code>/<code>WO</code> нет). Типовой сценарий — делегирование: разрешить группе создавать учётки в OU или разрешить ввод компьютеров в домен в конкретное подразделение.</p>
+<h3>Меры предосторожности</h3>
+<ul>
+<li>Сначала сохраните текущий дескриптор: <code>samba-tool dsacl get --objectdn=... &gt; sd-before.txt</code>; при ошибке верните ACE через <code>delete</code>.</li>
+<li><code>set</code> не заменяет SDDL целиком, а <strong>добавляет</strong> ACE — лишние записи накапливаются.</li>
+<li>Ошибочная <code>deny</code>-ACE на OU может отрезать администрирование; проверяйте результат <code>dsacl get</code> сразу после изменения.</li>
+<li>Права действуют немедленно и реплицируются; для проверки расхождений между DC — <code>samba-tool ldapcmp --sd</code> (см. <a href="%D0%9C%D0%BE%D0%BD%D0%B8%D1%82%D0%BE%D1%80%D0%B8%D0%BD%D0%B3-%D0%B8-%D0%B0%D0%B2%D1%82%D0%BE%D0%BC%D0%B0%D1%82%D0%B8%D0%B7%D0%B0%D1%86%D0%B8%D1%8F-Samba-AD-DC.html">Мониторинг и автоматизация Samba AD DC</a>).</li>
+<li>SID можно указывать строкой (<code>S-1-5-11</code> — Authenticated Users, <code>S-1-5-21-...</code> — группа домена) либо через <code>--trusteedn</code> с DN.</li>
+</ul>
+<h2>Парольные и аутентификационные политики</h2>
+<pre><code># samba-tool domain passwordsettings show
+# samba-tool domain passwordsettings set --complexity=on --min-pwd-length=12 \
+    --history-length=24 --min-pwd-age=1 --max-pwd-age=60
+# samba-tool domain passwordsettings set --store-plaintext=off
+# samba-tool domain passwordsettings pso --help      # fine-grained PSO
+</code></pre>
+<p>Значения по умолчанию (из help): сложность <code>on</code>, история <code>24</code>, минимальная длина <code>7</code>, минимальный возраст <code>1</code> день. Политика применяется при следующей смене пароля.</p>
+<p>Аутентификационные политики и силосы:</p>
+<pre><code># samba-tool domain auth policy --help
+#   computer-allowed-to-authenticate-to | create | delete | list | modify |
+#   service-allowed-to-authenticate-from | service-allowed-to-authenticate-to
+# samba-tool domain auth silo --help
+#   create | delete | list | member | modify | view
+# samba-tool user auth policy|silo --help            # привязка к пользователю
+</code></pre>
+<h2>Массовые операции и эквиваленты</h2>
+<pre><code># все члены каждой группы
+samba-tool group list | while IFS= read -r g; do
+  echo &quot;== $g&quot;; samba-tool group listmembers &quot;$g&quot;
+done
+
+# пакетное создание из CSV: login;given;sn
+while IFS=';' read -r login given sn; do
+  samba-tool user create &quot;$login&quot; --random-password \
+    --given-name=&quot;$given&quot; --surname=&quot;$sn&quot; --must-change-at-next-login
+done &lt; users.csv
+</code></pre>
+<p>Эквиваленты на уровне LDAP (без samba-tool, через ldap-клиенты):</p>
+<pre><code># пользователи в OU (только прямые дети)
+ldbsearch -H ldap://127.0.0.1 -U 'STAND\mininode2admin' \
+  -b 'OU=MiniNode1,DC=stand,DC=...' -s one '(objectClass=user)' dn
+
+# члены группы (атрибут member)
+ldbsearch -H ldap://127.0.0.1 -U 'STAND\mininode2admin' \
+  -b 'CN=it,OU=Отделы,DC=...' -s base '(objectClass=group)' member
+</code></pre>
+<p>Аналоги в PowerShell и данные (атрибуты, SID) — <a href="PowerShell-%D0%BA%D0%BE%D0%BC%D0%B0%D0%BD%D0%B4%D0%BB%D0%B5%D1%82%D1%8B-AD-%D0%B8-%D0%B0%D1%82%D1%80%D0%B8%D0%B1%D1%83%D1%82%D1%8B.html">PowerShell командлеты AD и атрибуты</a>.</p>
+<h2>Подводные камни</h2>
+<ul>
+<li><strong>Локальный режим — только на DC и от root.</strong> Удалённо (<code>-H ldap://...</code>) обязателен <code>-U</code>, иначе анонимный/LDAP-запрос не пройдёт.</li>
+<li><strong><code>ou listobjects</code> по умолчанию не рекурсивен</strong> — вложенные OU не раскрываются без <code>-r</code>.</li>
+<li><strong><code>--full-dn</code> меняет формат:</strong> без него у <code>listobjects</code> отрезается суффикс домена, а не OU.</li>
+<li><strong><code>--filter</code> опасен:</strong> <code>disable</code>, <code>setpassword</code>, <code>setexpiry</code> с фильтром затрагивают все совпавшие учётки.</li>
+<li><strong>Непустой OU:</strong> сначала перенесите/удалите объекты, затем удаляйте OU.</li>
+<li><strong>Парольные политики</strong> действуют при следующей смене пароля; уже существующие пароли не перестают работать.</li>
+<li><strong><code>addunixattrs</code> требует NIS-расширений</strong> (<code>--use-rfc2307</code> при provision) и согласованного idmap-диапазона; иначе атрибуты есть, а Unix их не видит.</li>
+<li><strong><code>user setpassword</code> ≠ <code>user password</code>:</strong> первый сбрасывает пароль другому (нужны права), второй меняет свой.</li>
+<li><strong>Пароли на командной строке</strong> видны в истории и <code>ps</code>; используйте <code>PASSWD_FILE</code>.</li>
+<li><strong><code>rm</code>-уровня защиты нет:</strong> <code>delete</code> удаляет объект сразу, корзина AD (<code>tombstones</code>) — отдельная тема.</li>
+</ul>
+<h2>Источники</h2>
+<ul>
+<li><code>man samba-tool</code> и вывод <code>--help</code> всех перечисленных подкоманд установленной Samba <strong>4.22.11</strong> (сверено локально; в более старых версиях часть подкоманд, например <code>delegation</code>, может отсутствовать или называться иначе).</li>
+<li>Samba Wiki, User Documentation: страницы об управлении пользователями, группами и OU (историческая справка — те же команды, но проверяйте версию).</li>
+</ul>
+<h2>Связанные заметки</h2>
+<ul>
+<li><a href="Samba-%D0%BA%D0%B0%D0%BA-%D1%87%D0%BB%D0%B5%D0%BD-%D0%B4%D0%BE%D0%BC%D0%B5%D0%BD%D0%B0.html">Samba как член домена</a></li>
+<li><a href="Idmap-%D0%B1%D1%8D%D0%BA%D0%B5%D0%BD%D0%B4%D1%8B-%D0%B8-RFC2307.html">Idmap бэкенды и RFC2307</a></li>
+<li><a href="%D0%A3%D0%BF%D1%80%D0%B0%D0%B2%D0%BB%D1%8F%D0%B5%D0%BC%D1%8B%D0%B5-%D0%A1%D0%B5%D1%80%D0%B2%D0%B8%D1%81%D0%BD%D1%8B%D0%B5-%D0%90%D0%BA%D0%BA%D0%B0%D1%83%D0%BD%D1%82%D1%8B-gMSA.html">Управляемые Сервисные Аккаунты gMSA</a></li>
+<li><a href="%D0%93%D1%80%D1%83%D0%BF%D0%BF%D0%BE%D0%B2%D1%8B%D0%B5-%D0%9F%D0%BE%D0%BB%D0%B8%D1%82%D0%B8%D0%BA%D0%B8-GPO.html">Групповые Политики GPO</a></li>
+<li><a href="%D0%A3%D1%81%D1%82%D0%B0%D0%BD%D0%BE%D0%B2%D0%BA%D0%B0-Samba-AD-DC.html">Установка Samba AD DC</a></li>
+<li><a href="PowerShell-%D0%BA%D0%BE%D0%BC%D0%B0%D0%BD%D0%B4%D0%BB%D0%B5%D1%82%D1%8B-AD-%D0%B8-%D0%B0%D1%82%D1%80%D0%B8%D0%B1%D1%83%D1%82%D1%8B.html">PowerShell командлеты AD и атрибуты</a></li>
+</ul>
+</main>
+</body>
+</html>

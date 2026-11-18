@@ -1,0 +1,257 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Сертификатный вход: PKINIT, KeyTrust и строгая привязка сертификатов</title>
+<link rel="stylesheet" href="../style.css">
+</head>
+<body>
+<nav><a href="../index.html">База знаний Samba AD DC</a></nav>
+<main><h1>Сертификатный вход: PKINIT, KeyTrust и строгая привязка сертификатов</h1>
+<h2>Суть</h2>
+<p>Вход по сертификату в Active Directory — это Kerberos-предварительная аутентификация PKINIT: клиент предъявляет KDC сертификат вместо пароля (смарт-карта, PIV-токен, Windows Hello for Business). Samba использует встроенный KDC Heimdal; PKINIT включается не в <code>smb.conf</code>, а в отдельном <code>krb5.conf</code> из каталога provision, плюс в <code>smb.conf</code> задаются TLS-файлы и CRL контроллера домена. Samba 4.24.0 (18 марта 2026) добавила вход KeyTrust для Windows Hello for Business (самоподписанные ключи, атрибут <code>msDS-KeyCredentialLink</code>), валидацию этого атрибута по MS-ADTS, команды <code>keytrust</code> и <code>generate-csr</code> — и включила по умолчанию строгую привязку сертификатов (<code>strong certificate binding enforcement = full</code>, аналог Microsoft KB5014754): проходят только «сильные» сопоставления (SID-расширение сертификата 1.3.6.1.4.1.311.25.2 или <code>altSecurityIdentities</code>), поэтому без миграции старые сертификаты перестают пускать пользователей в домен.</p>
+<h2>Ключевое</h2>
+<h3>Что добавили в Samba (4.24.0 и 4.19.0)</h3>
+<p>Разделы release notes Samba 4.24.0 (дословно):</p>
+<ul>
+<li><strong>Kerberos PKINIT KeyTrust logon support</strong>: «Samba servers configured with the embedded heimdal KDC and running as an ADDC, now support &quot;Windows Hello for Business Key-Trust logons&quot;. This allows the PKINIT authentication mechanism to be used with self-signed keys.» Публичный ключ хранится в атрибуте <code>msDS-KeyCredentialLink</code> учётной записи пользователя или компьютера.</li>
+<li><strong>msDS-KeyCredentialLink validation</strong>: «Updates to the msDS-KeyCredentialLink attribute are validated against the rules specified by MS-ADTS 3.1.1.5.3.1.1.6.»</li>
+<li><strong>Kerberos PKINIT strong/flexible key mappings</strong>: «The default enforcement mode (&quot;full&quot;) allows only strong certificate mappings»; режимы <code>compatibility</code> и <code>none</code> описаны ниже.</li>
+<li><strong>Kerberos PKINIT SID extension</strong>: «PKINIT authentication now supports certificates containing an Object SID extension (extension 1.3.6.1.4.1.311.25.2), this is considered to be a STRONG mapping for KB5014754.»</li>
+<li>Новые подкоманды <code>samba-tool user|computer generate-csr</code> и <code>user|computer keytrust</code>.</li>
+<li>Таблица изменений <code>smb.conf</code>: <code>strong certificate binding enforcement</code> — New, default <code>full</code>; <code>certificate backdating compensation</code> — New, default <code>0</code>.</li>
+</ul>
+<p>Samba 4.19.0 добавила отзыв сертификатов PKINIT (см. ниже) и «Protocol level testsuite for (Smart Card Logon) PKINIT» — независимый python-тест KDC для PKINIT вместо shell-скриптов вокруг MIT/Heimdal.</p>
+<p>Отдельно в 4.24.0 расширен аудит: классы отладки <code>dsdb_password_audit</code> и <code>dsdb_password_json_audit</code> теперь логируют изменения <code>altSecurityIdentities</code>, <code>dNSHostName</code>, <code>msDS-AdditionalDnsHostName</code>, <code>msDS-KeyCredentialLink</code> и <code>servicePrincipalName</code>; в JSON-логах для них поле <code>action</code> имеет значение <code>&quot;Auth info change&quot;</code>.</p>
+<h3>Настройка PKINIT в KDC: два файла</h3>
+<p><strong>1. <code>smb.conf</code></strong> — TLS-сертификат самого DC (блок из вики-страницы Smart Card Login, подставьте свои пути):</p>
+<pre><code class="language-ini">tls enabled = yes
+tls certfile = /var/lib/samba/private/tls/dc-cert.pem
+tls keyfile = /var/lib/samba/private/tls/secure/dc-privkey.pem
+tls cafile = /var/lib/samba/private/tls/cacert.pem
+tls crlfile = /var/lib/samba/private/tls/greatlakes.crl
+tls dhparams file = /var/lib/samba/private/tls/dcdhparams.pem
+</code></pre>
+<p>Значения по умолчанию из актуальной <code>smb.conf(5)</code>: <code>tls enabled = yes</code>, <code>tls cafile = tls/ca.pem</code>, <code>tls certfile = tls/cert.pem</code>, <code>tls crlfile</code> по умолчанию пуст, пути без ведущего <code>/</code> считаются относительно private dir. Параметр параметров Диффи-Хеллмана в man-странице называется <code>tls dh params file</code>, в HOWTO — <code>tls dhparams file</code>.</p>
+<p><strong>2. <code>krb5.conf</code></strong> — собственный krb5.conf Samba в каталоге provision (<code>/var/lib/samba/private/krb5.conf</code>). Блок из вики-страницы (в кавычках — предупреждение вики: «Note: the dash in &quot;enable-pkinit&quot; is not a typo.»):</p>
+<pre><code class="language-ini">[libdefaults]
+        default_realm = GREATLAKES.EXAMPLE.COM
+        dns_lookup_realm = false
+        dns_lookup_kdc = true
+        pkinit_anchors = FILE:/var/lib/samba/private/tls/cacert.pem
+
+[appdefaults]
+        pkinit_anchors = FILE:/var/lib/samba/private/tls/cacert.pem
+
+[realms]
+        GREATLAKES.EXAMPLE.COM = {
+                pkinit_require_eku = true
+        }
+
+[kdc]
+        enable-pkinit = yes
+        pkinit_identity = FILE:/var/lib/samba/private/tls/dc-cert.pem,/var/lib/samba/private/tls/secure/dc-privkey.pem
+        pkinit_anchors = FILE:/var/lib/samba/private/tls/cacert.pem
+        pkinit_principal_in_certificate = yes
+        pkinit_win2k = no
+        pkinit_win2k_require_binding = yes
+</code></pre>
+<p>Затем вики предлагает заменить системный <code>/etc/krb5.conf</code> копией этого файла — <strong>не символической ссылкой</strong>: с Samba 4.7 каталог <code>/var/lib/samba/private/</code> доступен только root, и по симлинку другие пользователи файл не прочитают (например, ломаются динамические DNS-обновления при бэкенде BIND_DLZ).</p>
+<p>Смысл опций по man-странице Heimdal <code>krb5.conf(5)</code> (актуальная ветка master):</p>
+<table>
+<thead>
+<tr>
+<th>Опция (секция)</th>
+<th>Что делает</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>enable-pkinit</code> (<code>[kdc]</code>)</td>
+<td>«Enable PKINIT (disabled by default).»</td>
+</tr>
+<tr>
+<td><code>pkinit_identity</code> (<code>[kdc]</code>)</td>
+<td>HX509-store с учётными данными PKINIT самого KDC (закрытый ключ + end-entity сертификат). Типы store: <code>FILE</code>, <code>PEM-FILE</code>, <code>DER-FILE</code>, <code>PKCS12</code>, <code>PKCS11</code> (на macOS ещё <code>KEYCHAIN</code>); несколько store перечисляются через запятую.</td>
+</tr>
+<tr>
+<td><code>pkinit_anchors</code> (<code>[kdc]</code>)</td>
+<td>Один или несколько store доверенных якорей для клиентских сертификатов PKINIT; поддерживается тип <code>DIR</code> (хеш-каталог в стиле OpenSSL).</td>
+</tr>
+<tr>
+<td><code>pkinit_pool</code> (<code>[kdc]</code>)</td>
+<td>Промежуточные CA для end-entity сертификата KDC.</td>
+</tr>
+<tr>
+<td><code>pkinit_revoke</code> (<code>[kdc]</code>)</td>
+<td>Store'ы CRL для издателей <strong>клиентских</strong> сертификатов PKINIT: «Only the first valid CRL for a particular issuer will be checked. If no CRLs are configured, then CRLs will not be checked. This is because the KDC will not dereference CRL distribution points nor request OCSP responses.»</td>
+</tr>
+<tr>
+<td><code>pkinit_principal_in_certificate</code> (<code>[kdc]</code>)</td>
+<td>Если <code>true</code>, KDC сопоставляет имена принципалов из AS-REQ со значениями <code>subjectAlternativeName</code> клиентских сертификатов; «Defaults to true.»</td>
+</tr>
+<tr>
+<td><code>pkinit_require_eku</code> (<code>[realms]</code>)</td>
+<td>Если <code>true</code>, в PKINIT-сертификатах KDC обязан присутствовать EKU OID KDC PKINIT (1.3.6.5.2.3.5); «Defaults to true.»</td>
+</tr>
+</tbody>
+</table>
+<h3>Сертификат контроллера домена</h3>
+<p>Требования из вики-страницы (OpenSSL-конфигурация HOWTO): <code>extendedKeyUsage = clientAuth,serverAuth,pkInitKDC</code>, <code>keyUsage = nonRepudiation, digitalSignature, keyEncipherment</code>, <code>crlDistributionPoints=URI:$CRLDISTPT</code>, а в subjectAltName — DNS-имя сервера и <code>otherName=msADGUID;FORMAT:HEX,OCTETSTRING:$set_dc_guid</code>, где <code>msADGUID=1.3.6.1.4.1.311.25.1</code>, а значение — objectGUID контроллера в hex-виде без дефисов (скрипт вики переставляет байты GUID, в шаблоне <code>openssl.cnf</code> — «omitting spaces in the domain controller GUID hex entry», пример: <code>set_dc_guid = 32bfa4aa2a1b43478ae3669f6109f08a</code>). Проверяют, что в SAN появилась запись типа «DS Object Guid» со значением <code>04 10 [Domain Controller GUID]</code>, где 04 — тег octet string, а 10 — длина 16 байт. GUID вики предлагает доставать через ADSI Edit или скриптом на базе <code>ldbsearch</code> по <code>OU=Domain Controllers</code> на самом DC.</p>
+<p>Требования Microsoft (страница Windows Hello for Business on-premises key trust) сформулированы так: в сертификате DC расширение CRL distribution point должно указывать на действительный CRL либо AIA — на OCSP-респондер; key usage — Digital Signature и Key Encipherment; extended key usage — Client Authentication (<code>1.3.6.1.5.5.7.3.2</code>), Server Authentication (<code>1.3.6.1.5.5.7.3.1</code>) и KDC Authentication (<code>1.3.6.1.5.2.3.5</code>); в SAN должно быть DNS-имя; корень сертификата должен быть в хранилище NTAuth (<code>Certutil -viewstore -enterprise NTAuth</code>), иначе аутентификация пользователя не пройдёт.</p>
+<p>На Windows-клиенте дополнительно нужно: импортировать корневой CA в Trusted Root через GPO, обновить <code>gpupdate</code> и добавить корневой сертификат в Enterprise NTAuth store (вики ссылается на метод 2 из KB295663 и приводит команду):</p>
+<pre><code>certutil -dspublish -f .\cacert.cer NTAuthCA
+</code></pre>
+<p>Приватный ключ DC (в т. ч. расшифрованный) должен читать только root.</p>
+<h3>Сертификат пользователя и <code>generate-csr</code></h3>
+<p>Пользовательский сертификат в HOWTO: <code>extendedKeyUsage = clientAuth,msSmartcardLogin</code>, а SAN содержит UPN как OtherName с OID msUPN:</p>
+<pre><code class="language-sh">openssl req -new -addext 'subjectAltName = otherName:msUPN;UTF8:tina@greatlakes.example.com,email:copy' -newkey rsa:2048 -keyout private/tinaadmin-key.pem -out tinaadmin-req.pem -config openssl.cnf
+</code></pre>
+<p>По вики именно UPN позволяет логике Kerberos на Samba сопоставить сертификат с учётной записью. На smart card сертификат с ключом переносится через PKCS#12 (<code>openssl pkcs12 -in tinaadmin-cert.pem -inkey private/tinaadmin-key.pem -export -out tinaadmin.p12</code>).</p>
+<p>Начиная с 4.24 CSR можно сгенерировать самой Samba — команда добавляет в запрос расширение с SID объекта:</p>
+<pre><code>samba-tool user generate-csr username
+	subject_name
+	private_key_filename
+	output_filename [options]
+
+samba-tool computer generate-csr computername
+	subject_name
+	private_key_filename
+	output_filename [options]
+
+--private-key-encoding   Specify which encoding the private key uses. Default is 'auto'.
+--private-key-pass       Provide a password to decrypt the private key.
+</code></pre>
+<p>Man-страница называет результат «PEM‐encoded Certificate Signing Request»; release notes уточняют, что CSR содержит Object SID extension (1.3.6.1.4.1.311.25.2). По коду <code>python/samba/generate_csr.py</code> (ветка master) в CSR включаются: SAN с OtherName msUPN (<code>ID_PKINIT_MS_SAN = x509.ObjectIdentifier(&quot;1.3.6.1.4.1.311.20.2.3&quot;)</code>), критичный <code>BasicConstraints(ca=False)</code>, критичный Subject Key Identifier, некритичный EKU <code>clientAuth</code>, keyUsage с одним <code>digital_signature=True</code> и некритичное расширение SID (<code>szOID_NTDS_CA_SECURITY_EXT = x509.ObjectIdentifier(&quot;1.3.6.1.4.1.311.25.2&quot;)</code>, структура описана в [MS-WCCE] 2.2.2.7.7.4). Поддерживаются только RSA-ключи («So far only RSA keys are supported»).</p>
+<h3>KeyTrust: <code>samba-tool ... keytrust</code> и <code>msDS-KeyCredentialLink</code></h3>
+<p>Команды (4.24.0, из man-страницы <code>samba-tool(8)</code>; для компьютеров — то же самое с <code>computer</code>):</p>
+<pre><code>samba-tool user keytrust add username public-key-or-certificate [options]
+samba-tool user keytrust view username [options]
+samba-tool user keytrust delete username [options]
+</code></pre>
+<ul>
+<li><code>add</code>: «Add a key-credential-link, which is a linked attribute that holds a public key in a binary field.» Второй аргумент — файл с <strong>2048-битным RSA-ключом</strong> (или сертификатом с таким ключом) в PEM или DER; формат определяется автоматически, переопределяется <code>--encoding=pem|der|auto</code>; «Other types of public key are not supported, though the --force option can be used to add a non-2048 bit key.» <code>--link-target=DN</code> — на какой DN ссылаться (по умолчанию DN самого пользователя/компьютера).</li>
+<li><code>view</code>: показывает ссылки, их fingerprint и целевой DN (для последующего <code>delete</code>); <code>-v</code> добавляет подробности.</li>
+<li><code>delete</code>: выбор ссылки через <code>--all</code>, <code>--link-target=DN</code> или <code>--fingerprint=HH:HH:..</code>; если задано несколько — удаляются все совпавшие; <code>--dry-run</code>/<code>-n</code> ничего не удаляет, только печатает план. Fingerprint — «the SHA256 of the DER-encoded key material, expressed as hex-pairs separated by colons».</li>
+</ul>
+<p>Реализация (<code>python/samba/key_credential_link.py</code>, master): создаётся <code>KEYCREDENTIALLINK_BLOB</code> версии 2 (<code>bytes.fromhex(&quot;00 02 00 00&quot;)  # Always version 2</code>) с записями KeyID (SHA-256 материала ключа), KeyMaterial (публичный ключ в DER, SubjectPublicKeyInfo), KeyUsage — всегда <code>KEY_USAGE_NGC</code> — и KeyCreationTime (nttime); запись KeySource в коде закомментирована. Fingerprint считается как SHA-256 от DER-материала ключа и печатается парами hex-байт, разделёнными двоеточиями, в верхнем регистре.</p>
+<p>Валидация атрибута — по MS-ADTS 3.1.1.5.3.1.1.6 (на неё прямо ссылаются release notes). Спецификация требует от добавляемого значения: корректный <code>KEYCREDENTIALLINK_BLOB</code>; <code>The KeyUsage entry is KEY_USAGE_NGC.</code>; <code>The KeySource entry is KEY_SOURCE_AD.</code>; <code>The CustomKeyInformation entry is not present.</code>; <code>The KeyApproximateLastLogonTimeStamp entry is not present.</code>; <code>There is no existing value.</code>; <code>The requestor MUST be SELF.</code> Плюс для записи нужно право <strong>DS-Validated-Write-Computer</strong>. Структура: <code>Version</code> (4 байта, <code>MUST be set to KEY_CREDENTIAL_LINK_VERSION_2</code>) и массив <code>KEYCREDENTIALLINK_ENTRY</code>, который <code>MUST be sorted by their Identifier fields in increasing order</code> (MS-ADTS 2.2.20.2). Заметим: правила MS-ADTS 3.1.1.5.3.1.1.6 сформулированы для объекта класса <code>computer</code>, тогда как Samba 4.24 даёт команду <code>keytrust</code> и для пользователей; как при работе через <code>samba-tool</code> выполняются условия «requestor MUST be SELF» и право DS-Validated-Write-Computer, в release notes и man-странице не описано.</p>
+<h3>Строгая привязка сертификатов: <code>strong certificate binding enforcement</code></h3>
+<p>Новый глобальный параметр <code>smb.conf</code> (Samba 4.24.0), аналог KB5014754. Значения (дословно из <code>smb.conf(5)</code>):</p>
+<ul>
+<li><code>none</code> — «No validation of the certificate mappings is performed».</li>
+<li><code>compatibility</code> — «Weak certificate mappings are permitted. In compatibility mode for WEAK mappings the date the certificate was issued must be after the date that the user was created. Unless certificate backdating compensation has a value. In that case the certificate may have been issued no more than that number of minutes before the user was created.»</li>
+<li><code>full</code> — «Only strong certificate mappings are permitted. This is the default.»</li>
+</ul>
+<p>Сопутствующий параметр <code>certificate backdating compensation</code> — число минут, на которое сертификат может быть выпущен раньше создания учётной записи, применяется только в режиме <code>compatibility</code>; по умолчанию <code>0</code>.</p>
+<p>Типы сопоставлений (по <code>smb.conf(5)</code> и KB5014754):</p>
+<table>
+<thead>
+<tr>
+<th>Сопоставление</th>
+<th>Пример записи</th>
+<th>Тип</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>X509 Issuer and subject (X509IssuerSubject)</td>
+<td><code>X509:&lt;I&gt;IssuerName&lt;S&gt;SubjectName</code></td>
+<td>WEAK</td>
+</tr>
+<tr>
+<td>X509 Subject only (X509SubjectOnly)</td>
+<td><code>X509:&lt;S&gt;SubjectName</code></td>
+<td>WEAK</td>
+</tr>
+<tr>
+<td>X509 RFC822 (адрес e-mail)</td>
+<td><code>X509:&lt;RFC822&gt;test@example.com</code></td>
+<td>WEAK</td>
+</tr>
+<tr>
+<td>X509 Issuer and serial number (X509IssuerSerialNumber)</td>
+<td><code>X509:&lt;I&gt;IssuerName&lt;SR&gt;123456789</code></td>
+<td>STRONG (KB: recommended)</td>
+</tr>
+<tr>
+<td>X509 Subject Key Identifier (X509SKI)</td>
+<td>в <code>smb.conf(5)</code> — <code>&lt;SKI&gt;01234xxxxx</code>, в KB — <code>X509:&lt;SKI&gt;123456789abcdef</code></td>
+<td>STRONG</td>
+</tr>
+<tr>
+<td>X509 public key SHA1 (X509SHA1PublicKey)</td>
+<td><code>X509:&lt;SHA1-PUKEY&gt;1234567890abcdef</code></td>
+<td>STRONG</td>
+</tr>
+<tr>
+<td>SID-расширение сертификата (OID 1.3.6.1.4.1.311.25.2)</td>
+<td>—</td>
+<td>STRONG</td>
+</tr>
+</tbody>
+</table>
+<p>Сопоставления задаются в атрибуте <code>altSecurityIdentities</code> учётной записи; KB5014754 подчёркивает, что поля Issuer/Subject/Serial в сертификате печатаются «в прямом порядке», а в атрибут их нужно вписывать в обратном. Рекомендованная конфигурация KDC из release notes 4.24.0:</p>
+<pre><code>strong certificate binding enforcement                            full
+kdc always include pac                                            yes
+kdc require canonicalization                                      yes
+</code></pre>
+<p>(В прозе release notes встречается имя <code>kdc always generate pac</code>, но в таблице параметров и в <code>smb.conf(5)</code> параметр называется <code>kdc always include pac</code>.)</p>
+<p>Что это значит на стороне Windows (KB5014754): значения <code>HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\Kdc</code> — <code>StrongCertificateBindingEnforcement</code> <code>1</code> (проверка сильного сопоставления; иначе SID-расширение; иначе аутентификация разрешается, если учётная запись старше сертификата), <code>2</code> (то же, но без SID-расширения вход запрещён), <code>0</code> (проверка отключена, «Not recommended…»). С Windows-обновлением от 11 февраля 2025 DC переходят в Full Enforcement, если ключ не настроен; обновление от 9 сентября 2025 делает значение реестра неподдерживаемым. Enterprise CA добавляют SID-расширение с OID <code>1.3.6.1.4.1.311.25.2</code> во все сертификаты, выпущенные по online-шаблонам, с обновления от 10 мая 2022; отключить можно битом <code>0x00080000</code> в <code>msPKI-Enrollment-Flag</code> шаблона.</p>
+<h3>Отзыв сертификатов (Samba 4.19.0)</h3>
+<p>Release notes 4.19.0: «Samba will now correctly honour the revocation of 'smart card' certificates used for PKINIT Kerberos authentication.» Дополнительная опция krb5.conf:</p>
+<pre><code class="language-ini"> [kdc]
+	pkinit_revoke = FILE:/path/to/crl.pem
+</code></pre>
+<p>Список CRL перечитывается при каждом изменении файла — достаточно заменить файл, ничего не перезапуская. В том же релизе: TLS-сертификаты LDAP-сервера Samba AD можно перезагружать без рестарта командой <code>smbcontrol ldap_server reload-certs</code>.</p>
+<h3>Диагностика</h3>
+<ul>
+<li>На Windows при входе по смарт-карте возможна ошибка «An untrusted certification authority was detected while processing the domain controller certificate used for authentication…»; в HOWTO она возникла при первом входе и ушла после перезагрузки сервера и клиента (репликация Samba ↔ Windows занимает время).</li>
+<li>В KB5014754 описано событие KDC с текстом «The Key Distribution Center (KDC) encountered a user certificate that was valid but contained a different SID than the user to which it mapped…» — сертификат содержит SID другого пользователя.</li>
+<li>Рекомендации KB: если сертификат старше учётной записи — перевыпустить сертификат или добавить сильное сопоставление в <code>altSecurityIdentities</code>; если в сертификате есть SID-расширение — проверить, что SID совпадает с учётной записью; если безопасного сопоставления нет — добавить его или оставить домен в Compatibility mode, пока это возможно.</li>
+<li>В Samba 4.24 изменения <code>altSecurityIdentities</code> и <code>msDS-KeyCredentialLink</code> попадают в аудит (<code>dsdb_password_audit</code>, <code>dsdb_password_json_audit</code>, action <code>&quot;Auth info change&quot;</code>) — удобно для отслеживания правок сопоставлений.</li>
+<li>Сертификаты разбирают командой HOWTO <code>openssl x509 -in cacert.pem -text -out cacert.txt</code>; там же проверяют, что в SAN есть запись типа «DS Object Guid» со значением <code>04 10 [Domain Controller GUID]</code>.</li>
+</ul>
+<h2>Подводные камни</h2>
+<ul>
+<li><strong><code>full</code> по умолчанию ломает старый вход по сертификатам.</strong> Сертификат без SID-расширения и без <code>altSecurityIdentities</code> не проходит строгую привязку; заранее или вместе с обновлением нужно либо перевыпустить сертификаты с SID-расширением (<code>samba-tool ... generate-csr</code>), либо прописать сильные сопоставления, либо временно выставить <code>compatibility</code>/<code>none</code>. У Windows поддержку реестрового ключа прекратили обновлением от 9 сентября 2025 — на смешанных доменах сроки стоит синхронизировать.</li>
+<li><strong>Семантика режимов у Samba и Windows не совпадает буквально.</strong> В Samba <code>compatibility</code> разрешает слабые сопоставления, но требует, чтобы сертификат был выпущен позже создания учётной записи (с поправкой <code>certificate backdating compensation</code>); в Windows Compatibility mode — это отдельный набор правил из KB5014754.</li>
+<li><strong>Единицы и умолчания <code>certificate backdating compensation</code> различаются.</strong> В <code>smb.conf(5)</code> это минуты, по умолчанию <code>0</code>; реестровый аналог Windows <code>CertificateBackdatingCompensation</code> по умолчанию равен 10 минутам при отсутствии ключа (в самом KB единицы описаны как «in seconds», хотя примеры значений приведены в годах). Это разные механизмы, значения нельзя переносить напрямую.</li>
+<li><strong>Отзыв сертификатов в 4.19+ не подтягивает CRL сам.</strong> KDC не обращается к CRL distribution point и не запрашивает OCSP (Heimdal <code>krb5.conf(5)</code>), поэтому CRL нужно локально положить в <code>pkinit_revoke</code>; проверяется только первый действительный CRL для издателя, а без настроенных CRL проверка не выполняется вовсе. При этом Windows-клиенты сами требуют, чтобы у смарт-карт-сертификата был доступный CDP (иначе отзыв не проверить).</li>
+<li><strong>Вики-HOWTO устарела.</strong> Страница описывает стенд на Ubuntu Server 22.04 с Samba 4.15.5 (2022 год) и ничего не знает ни о KeyTrust, ни о строгой привязке; её ссылка на руководство Heimdal «Setting up PK-INIT» (h5l.org) больше не открывается — домен перенаправляет на GitHub. Параметры <code>pkinit_win2k</code> и <code>pkinit_win2k_require_binding</code> из блока HOWTO описаны в архивной документации Heimdal 1.5, но в актуальной man-странице Heimdal <code>krb5.conf(5)</code> (ветка master) они не упоминаются — перед копированием блока в конфиг проверьте, что ваша сборка их принимает.</li>
+<li><strong><code>enable-pkinit</code> пишется через дефис</strong> (Heimdal), в отличие от остальных опций с подчёркиваниями; вики отмечает это отдельно.</li>
+<li><strong><code>/etc/krb5.conf</code> не делайте симлинком</strong> на <code>/var/lib/samba/private/krb5.conf</code> (Samba 4.7+): каталог читает только root, и, например, динамические DNS-обновления при BIND_DLZ сломаются — нужна копия файла.</li>
+<li><strong>KeyTrust ограничен RSA 2048.</strong> <code>keytrust add</code> принимает ключ/сертификат в PEM или DER, формат определяется автоматически, но «Other types of public key are not supported» без <code>--force</code>; <code>generate-csr</code> в текущем коде тоже умеет только RSA-ключи.</li>
+<li><strong>Требования к сертификату DC жёстче, чем «лишь бы TLS работал».</strong> Нужны EKU <code>clientAuth</code> + <code>serverAuth</code> + <code>pkInitKDC</code> (KDC Authentication 1.3.6.1.5.2.3.5), SAN с DNS-именем и <code>otherName</code> msADGUID, действующий CRL distribution point и корень в NTAuth — иначе Windows-клиент откажется входить (вики, KB295663, страница Microsoft по key trust).</li>
+<li><strong>В Samba параметр называется <code>kdc always include pac</code></strong>, хотя в тексте release notes 4.24.0 встречается <code>kdc always generate pac</code>; ориентируйтесь на таблицу параметров и <code>smb.conf(5)</code>.</li>
+<li><strong>Атрибут <code>msDS-KeyCredentialLink</code> защищён валидацией и правами.</strong> По MS-ADTS 3.1.1.5.3.1.1.6 при добавлении обязательны <code>KEY_USAGE_NGC</code>, отсутствие <code>CustomKeyInformation</code> и <code>KeyApproximateLastLogonTimeStamp</code>, единственное значение, requestor MUST be SELF и право DS-Validated-Write-Computer; release notes заявляют, что Samba 4.24 проверяет обновления по этим правилам.</li>
+</ul>
+<h2>Источники</h2>
+<ol>
+<li>https://www.samba.org/samba/history/samba-4.24.0.html — release notes 4.24.0 (18.03.2026): KeyTrust-вход, валидация <code>msDS-KeyCredentialLink</code>, strong/flexible mappings и режим <code>full</code> по умолчанию, SID-расширение, новые подкоманды <code>keytrust</code>/<code>generate-csr</code>, рекомендованная конфигурация KDC, аудит атрибутов, таблица изменений <code>smb.conf</code>.</li>
+<li>https://www.samba.org/samba/history/samba-4.19.0.html — release notes 4.19.0: отзыв PKINIT-сертификатов и опция <code>pkinit_revoke</code>, python-тесты PKINIT, перезагрузка TLS-сертификатов LDAP (<code>smbcontrol ldap_server reload-certs</code>).</li>
+<li>https://www.samba.org/samba/docs/current/man-html/smb.conf.5.html — <code>strong certificate binding enforcement</code>, <code>certificate backdating compensation</code>, типы сопоставлений с метками WEAK/STRONG, параметры <code>tls *</code>, <code>kdc always include pac</code>, <code>kdc require canonicalization</code>.</li>
+<li>https://www.samba.org/samba/docs/current/man-html/samba-tool.8.html — подкоманды <code>user|computer keytrust add|view|delete</code> и <code>user|computer generate-csr</code>, их опции, требования к ключу и формат fingerprint.</li>
+<li>https://wiki.samba.org/index.php/Samba_AD_Smart_Card_Login — HOWTO «Allowing Smart Card Login to a Samba4 Domain» (стенд на Samba 4.15.5): TLS-блок <code>smb.conf</code>, блок PKINIT в <code>/var/lib/samba/private/krb5.conf</code>, требования к сертификатам DC и пользователя (EKU, SAN msADGUID/msUPN), CRL distribution point, NTAuth store, импорт PKCS#12, предупреждение о симлинке на krb5.conf.</li>
+<li>https://support.microsoft.com/en-us/topic/kb5014754-certificate-based-authentication-changes-on-windows-domain-controllers-ad2c23b0-15d8-4340-a468-4d4f3b188f16 — KB5014754: сильные и слабые сопоставления, OID SID-расширения 1.3.6.1.4.1.311.25.2 и его включение в enterprise CA, значения <code>StrongCertificateBindingEnforcement</code> 0/1/2, <code>CertificateBackdatingCompensation</code>, даты перехода в Enforcement, текст события KDC о несовпадении SID.</li>
+<li>https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-adts/f70afbcc-780e-4d91-850c-cfadce5bb15c — MS-ADTS 3.1.1.5.3.1.1.6: правила валидации <code>msDS-KeyCredentialLink</code> (KEY_USAGE_NGC, KEY_SOURCE_AD, отсутствие CustomKeyInformation и KeyApproximateLastLogonTimeStamp, requestor MUST be SELF, право DS-Validated-Write-Computer).</li>
+<li>https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-adts/f3f01e95-6d0c-4fe6-8b43-d585167658fa — MS-ADTS 2.2.20.2: структура <code>KEYCREDENTIALLINK_BLOB</code> (Version = KEY_CREDENTIAL_LINK_VERSION_2, сортировка записей по Identifier).</li>
+<li>https://raw.githubusercontent.com/heimdal/heimdal/master/lib/krb5/krb5.conf.5 — man-страница Heimdal <code>krb5.conf(5)</code>: опции <code>[kdc]</code> <code>enable-pkinit</code>, <code>pkinit_identity</code>, <code>pkinit_pool</code>, <code>pkinit_anchors</code>, <code>pkinit_revoke</code>, <code>pkinit_principal_in_certificate</code> и <code>[realms]</code> <code>pkinit_require_eku</code> с их формулировками.</li>
+<li>https://web.archive.org/web/2016/http://www.h5l.org/manual/heimdal-1-5-branch/info/heimdal/Setting-up-PK_002dINIT.html — архивная документация Heimdal 1.5 «Setting up PK-INIT»: примеры конфигурации клиента и KDC, включая <code>pkinit_win2k</code> и <code>pkinit_win2k_require_binding</code> (на неё ссылается вики-HOWTO).</li>
+<li>https://raw.githubusercontent.com/samba-team/samba/master/python/samba/generate_csr.py — реализация <code>generate-csr</code>: OID SID-расширения (szOID_NTDS_CA_SECURITY_EXT), SAN msUPN, набор расширений CSR, поддержка только RSA.</li>
+<li>https://raw.githubusercontent.com/samba-team/samba/master/python/samba/key_credential_link.py — реализация key credential link: версия 2 блоба, KeyID/KeyMaterial/KeyUsage(NGC)/KeyCreationTime, формат fingerprint (SHA-256 материала ключа).</li>
+<li>https://gitlab.com/samba-team/samba/-/raw/master/python/samba/netcmd/user/keytrust.py и https://gitlab.com/samba-team/samba/-/raw/master/python/samba/netcmd/user/generate_csr.py — обёртки подкоманд <code>samba-tool user keytrust</code> и <code>user generate-csr</code> (аргументы, опции, порядок работы).</li>
+<li>https://learn.microsoft.com/en-us/windows/security/identity-protection/hello-for-business/deploy/on-premises-key-trust — руководство Microsoft по on-premises key trust для Windows Hello for Business: требования к сертификату DC (EKU clientAuth/serverAuth/KDC Authentication, CRL DP или AIA/OCSP, SAN с DNS-именем, корень в NTAuth).</li>
+</ol>
+<h2>Связанные заметки</h2>
+<ul>
+<li><a href="LDAPS-%D0%A1%D0%B5%D1%80%D1%82%D0%B8%D1%84%D0%B8%D0%BA%D0%B0%D1%82%D1%8B-AD-DC.html">LDAPS Сертификаты AD DC</a></li>
+<li><a href="%D0%94%D0%B8%D0%B0%D0%B3%D0%BD%D0%BE%D1%81%D1%82%D0%B8%D0%BA%D0%B0-AD-DC.html">Диагностика AD DC</a></li>
+<li><a href="%D0%9E%D0%B1%D0%BD%D0%BE%D0%B2%D0%BB%D0%B5%D0%BD%D0%B8%D0%B5-Samba.html">Обновление Samba</a></li>
+<li><a href="%D0%A3%D1%81%D1%82%D0%B0%D0%BD%D0%BE%D0%B2%D0%BA%D0%B0-Samba-AD-DC.html">Установка Samba AD DC</a></li>
+<li><a href="%D0%A5%D0%B0%D1%80%D0%B4%D0%B5%D0%BD%D0%B8%D0%BD%D0%B3-Samba-AD-DC.html">Харденинг Samba AD DC</a></li>
+</ul>
+</main>
+</body>
+</html>

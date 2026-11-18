@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Samba CI на GitLab</title>
+<link rel="stylesheet" href="../style.css">
+</head>
+<body>
+<nav><a href="../index.html">База знаний Samba AD DC</a></nav>
+<main><h1>Samba CI на GitLab</h1>
+<h2>Суть</h2>
+<p>Страница описывает зеркало официального git-репозитория Samba на GitLab и общий репозиторий разработки с бесплатным CI: каждый push в определённым образом названную ветку запускает автоматическую сборку и прогон тестов — до открытия merge request. CI идёт на комбинации облачных VM и общих runner'ов GitLab.com. Оба репозитория:</p>
+<ul>
+<li><strong>Официальное зеркало:</strong> <code>https://gitlab.com/samba-team/samba</code> — против него открывают merge request'ы;</li>
+<li><strong>Общий репозиторий разработки:</strong> <code>https://gitlab.com/samba-team/devel/samba</code> — в него пушат ветки для прогона полного CI (форк на gitlab.com по умолчанию прогоняет не весь набор тестов).</li>
+</ul>
+<h2>Ключевое</h2>
+<h3>Доступ</h3>
+<ul>
+<li><strong>Члены Samba Team</strong> — просят доступ в командном списке рассылки с командного адреса, указав имя пользователя GitLab; участник с правами Maintainer добавляет их как Developer через <code>https://gitlab.com/groups/samba-team/-/group_members</code>.</li>
+<li><strong>Остальные разработчики</strong> — пишут на <code>contributing@samba.org</code> с именем пользователя GitLab и историей/планами контрибуции; доступ выдают активным в списке рассылки участникам с патчами, добавляя в <code>https://gitlab.com/samba-team/devel/samba/project_members</code>.</li>
+</ul>
+<h3>Запуск CI</h3>
+<p>Настроить remote и пушить ветку с префиксом — своим именем пользователя GitLab в формате <code>$USER/topic</code> (если локальное имя отличается от GitLab-имени, использовать GitLab-имя):</p>
+<pre><code class="language-bash">git remote add gitlab-ci git@gitlab.com:samba-team/devel/samba.git
+git push gitlab-ci +HEAD:$USER/foo
+</code></pre>
+<blockquote>
+<p>На странице вики примеры имён веток приведены в двух форматах — и <code>$USER-foo</code> (через дефис), и <code>$USER/topic</code> (через слэш); критичен именно префикс с именем пользователя GitLab, а не разделитель. Здесь и в <a href="%D0%92%D0%BA%D0%BB%D0%B0%D0%B4-%D0%B2-%D0%BA%D0%BE%D0%B4-Samba.html">Вклад в код Samba</a> используется единый формат <code>$USER/topic</code>.</p>
+</blockquote>
+<p>Push автоматически запускает CI; результаты — <code>https://gitlab.com/samba-team/devel/samba/pipelines</code>. Описательное имя ветки заодно подставляется в заголовок merge request'а.</p>
+<h3>Merge request'ы</h3>
+<ul>
+<li>После push GitLab печатает ссылку «Create Merge Request» (нет ссылки — возможна проблема ssh-конфигурации; MR создают вручную).</li>
+<li><strong>Сменить целевой проект:</strong> GitLab иногда предлагает целевым репозиторий <code>samba-team/devel/samba</code> — в описании будет предупреждение, что MR должны идти против <code>https://gitlab.com/samba-team/samba/</code>; исправляется кнопкой «Change branches».</li>
+<li>Повторный push в ту же ветку (<code>git push gitlab-ci +HEAD:$USER/foo -f</code>) обновляет MR и перезапускает CI; пока MR открыт, имя ветки не переиспользуют.</li>
+<li>Дополнительно можно послать URL MR в список рассылки samba-technical.</li>
+</ul>
+<h3>Слияние (члены команды)</h3>
+<p>Кнопка Merge в GitLab для слияния в master не работает. Процедура ручная: скачать патч (например, <code>https://gitlab.com/samba-team/samba/merge_requests/12.patch</code>), добавить теги ревью, выполнить <code>git autobuild</code> локально; после попадания в master закрыть MR комментарием вида <code>Merged into master as &lt;git hash&gt; for Samba &lt;next version&gt;.</code></p>
+<h3>Особые приёмы CI</h3>
+<p>Push-опции <code>-o ci.variable=...</code>:</p>
+<pre><code class="language-bash"># Полный autobuild без ранней остановки на первой ошибке
+git push -o ci.variable='AUTOBUILD_FAIL_IMMEDIATELY=0' gitlab-ci
+# Пропустить задачи -O3 (экономит 9 VM)
+git push -o ci.variable='AUTOBUILD_SKIP_SAMBA_O3=1' gitlab-ci
+# Оба флага сразу
+git push -o ci.variable='AUTOBUILD_FAIL_IMMEDIATELY=0' -o ci.variable='AUTOBUILD_SKIP_SAMBA_O3=1' gitlab-ci
+# Пропустить CI целиком (пуши только документации/правок сообщений)
+git push -o ci.skip gitlab-ci
+# Сборка с покрытием
+git push -o ci.variable='SAMBA_CI_AUTOBUILD_ENABLE_COVERAGE=--enable-coverage' gitlab-ci
+</code></pre>
+<p>Контейнерные образы для CI описаны в <code>bootstrap/README.md</code> репозитория samba-team/samba.</p>
+<h2>Подводные камни</h2>
+<ul>
+<li><strong>Таймаут задач на форке:</strong> по умолчанию 1 час; без увеличения до 3 часов (допустимо на бесплатных runner'ах) push падает с <code>ERROR: Job failed: execution took longer than 1h0m0s seconds</code>.</li>
+<li><strong>Неверный целевой репозиторий MR:</strong> GitLab предлагает <code>devel/samba</code> — целевым должен быть <code>samba-team/samba</code>.</li>
+<li><strong>Нет ссылки на создание MR после push</strong> — проверить ssh-конфигурацию или создать MR вручную.</li>
+<li><strong>Coverage-задачи могут падать</strong> на общих runner'ах: окружение слабее плановых пайплайнов.</li>
+<li><strong>Недоступность gitlab.com:</strong> статус — <code>https://status.gitlab.com/</code>; git децентрализован, локальная работа не прерывается.</li>
+<li>Слияние в master — только через локальный <code>git autobuild</code> членом команды (см. <a href="%D0%92%D0%BA%D0%BB%D0%B0%D0%B4-%D0%B2-%D0%BA%D0%BE%D0%B4-Samba.html">Вклад в код Samba</a>, <a href="%D0%9A%D0%BE%D0%B4-%D1%80%D0%B5%D0%B2%D1%8C%D1%8E.html">Код ревью</a>).</li>
+</ul>
+<h2>Связанные заметки</h2>
+<ul>
+<li><a href="%D0%92%D0%BA%D0%BB%D0%B0%D0%B4-%D0%B2-%D0%BA%D0%BE%D0%B4-Samba.html">Вклад в код Samba</a></li>
+<li><a href="Git-%D0%B4%D0%BB%D1%8F-%D1%80%D0%B0%D0%B7%D1%80%D0%B0%D0%B1%D0%BE%D1%82%D0%BA%D0%B8-Samba.html">Git для разработки Samba</a></li>
+<li><a href="%D0%9A%D0%BE%D0%B4-%D1%80%D0%B5%D0%B2%D1%8C%D1%8E.html">Код ревью</a></li>
+<li><a href="%D0%94%D0%BE%D0%BA%D1%83%D0%BC%D0%B5%D0%BD%D1%82%D0%B0%D1%86%D0%B8%D1%8F-%D1%80%D0%B0%D0%B7%D1%80%D0%B0%D0%B1%D0%BE%D1%82%D1%87%D0%B8%D0%BA%D0%B0.html">Документация разработчика</a></li>
+</ul>
+</main>
+</body>
+</html>

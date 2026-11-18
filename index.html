@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Samba AD DC — база знаний</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<main><h1>Samba AD DC — база знаний</h1>
+<blockquote>
+<p>Собрано: 2026-10-07 · Источник: официальная <a href="https://wiki.samba.org/">Samba Wiki</a>
+Карта связей: <code>Карта-знаний.canvas</code> · Заметки лежат в <code>notes/</code>, исходные HTML-страницы — в <code>assets/</code>
+Дополнено: 2026-10-13 — добавлены 12 заметок из интернета: пять в тематических разделах (установка, эксплуатация, члены домена) и семь в разделе «Расширение из интернета».
+Дополнено: 2026-10-22 — добавлен раздел «Администрирование: пользователи, группы, OU».</p>
+</blockquote>
+<p>База знаний по развёртыванию и эксплуатации контроллера домена Active Directory на базе Samba, членам домена, файловым сервисам и участию в разработке Samba.</p>
+<h2>Подготовка и установка контроллера домена</h2>
+<ul>
+<li><a href="notes/%D0%98%D0%BC%D0%B5%D0%BD%D0%BE%D0%B2%D0%B0%D0%BD%D0%B8%D0%B5-%D0%B4%D0%BE%D0%BC%D0%B5%D0%BD%D0%B0-FAQ.html">Именование домена FAQ</a> — правила выбора DNS-имени и NetBIOS-имени домена; на этапе provision их нельзя исправить без переделки домена.</li>
+<li><a href="notes/%D0%A3%D1%81%D1%82%D0%B0%D0%BD%D0%BE%D0%B2%D0%BA%D0%B0-Samba-AD-DC.html">Установка Samba AD DC</a> — установка Samba и provision первого контроллера домена: <code>samba-tool domain provision</code>, выбор DNS-бэкенда, проверка через smbclient, host и kinit.</li>
+<li><a href="notes/%D0%94%D0%B8%D1%81%D1%82%D1%80%D0%B8%D0%B1%D1%83%D1%82%D0%B8%D0%B2%D0%BD%D1%8B%D0%B5-%D0%BF%D0%B0%D0%BA%D0%B5%D1%82%D1%8B-Samba-AD-DC.html">Дистрибутивные пакеты Samba AD DC</a> — пакеты и службы AD DC в дистрибутивах: <code>samba-ad-dc</code> в Debian/Ubuntu и SLES/openSUSE, <code>samba-dc</code> в Fedora, отсутствие роли в RHEL/CentOS и пошаговая инструкция Arch Wiki вплоть до второго DC и DHCP с динамическими DNS-обновлениями.</li>
+<li><a href="notes/%D0%A3%D0%BF%D1%80%D0%B0%D0%B2%D0%BB%D0%B5%D0%BD%D0%B8%D0%B5-%D1%81%D0%BB%D1%83%D0%B6%D0%B1%D0%BE%D0%B9-AD-DC.html">Управление службой AD DC</a> — systemd, init-скрипт и Upstart; на DC служба <code>samba</code> сама запускает smbd и winbindd как подпроцессы.</li>
+<li><a href="notes/%D0%9F%D0%BE%D1%80%D1%82%D1%8B-AD-DC.html">Порты AD DC</a> — полный список портов контроллера домена (53, 88, 123, 135, 137–139, 389, 445, 464, 636, 3268/3269, 49152–65535) для настройки межсетевого экрана.</li>
+<li><a href="notes/%D0%9F%D1%80%D0%B8%D1%81%D0%BE%D0%B5%D0%B4%D0%B8%D0%BD%D0%B5%D0%BD%D0%B8%D0%B5-%D0%B2%D1%82%D0%BE%D1%80%D0%BE%D0%B3%D0%BE-DC-%D0%BA-%D0%B4%D0%BE%D0%BC%D0%B5%D0%BD%D1%83.html">Присоединение второго DC к домену</a> — <code>samba-tool domain join</code> к существующему лесу; синхронизация idmap.ldb и SysVol, проверка DNS и репликации.</li>
+<li><a href="notes/%D0%9C%D0%B8%D0%B3%D1%80%D0%B0%D1%86%D0%B8%D1%8F-NT4-%D0%B4%D0%BE%D0%BC%D0%B5%D0%BD%D0%B0-%D0%B2-Samba-AD.html">Миграция NT4 домена в Samba AD</a> — переход на Samba AD командой <code>samba-tool domain classicupgrade</code>: перенос tdb (secrets, passdb, account_policy), что мигрирует и что теряется, необратимость операции и переезд с Windows AD через adprep.</li>
+<li><a href="notes/Windows-DC-%D1%80%D1%8F%D0%B4%D0%BE%D0%BC-%D1%81-Samba-DC.html">Windows DC рядом с Samba DC</a> — смешанный домен с Windows DC: разница схемы, подготовки и функционального уровня, schemaupgrade/functionalprep, обход adprep для 2016+ и ограничения обратного входа Samba DC.</li>
+</ul>
+<h2>DNS, Kerberos и синхронизация времени</h2>
+<ul>
+<li><a href="notes/%D0%92%D0%BD%D1%83%D1%82%D1%80%D0%B5%D0%BD%D0%BD%D0%B8%D0%B9-DNS-%D0%B1%D1%8D%D0%BA%D0%B5%D0%BD%D0%B4.html">Внутренний DNS бэкенд</a> — INTERNAL_DNS: ограничения (нет кэширования, рекурсии, TSIG, передачи зон), динамические обновления и dns forwarder; отказ запуска при занятом порте 53.</li>
+<li><a href="notes/BIND9-DLZ-DNS-%D0%B1%D1%8D%D0%BA%D0%B5%D0%BD%D0%B4.html">BIND9 DLZ DNS бэкенд</a> — бэкенд BIND9_DLZ: выбор модуля dlz под версию BIND, tkey-gssapi-keytab, samba_upgradedns; требования (тот же хост, без chroot, restart вместо reload) и проблема блокировок под нагрузкой.</li>
+<li><a href="notes/%D0%A1%D0%B8%D0%BD%D1%85%D1%80%D0%BE%D0%BD%D0%B8%D0%B7%D0%B0%D1%86%D0%B8%D1%8F-%D0%B2%D1%80%D0%B5%D0%BC%D0%B5%D0%BD%D0%B8.html">Синхронизация времени</a> — Kerberos требует расхождения не больше 5 минут; иерархия времени (PDC Emulator → DC → клиенты) и конфиги ntpd, chrony, systemd-timesyncd.</li>
+<li><a href="notes/%D0%94%D0%B8%D0%B0%D0%B3%D0%BD%D0%BE%D1%81%D1%82%D0%B8%D0%BA%D0%B0-AD-DC.html">Диагностика AD DC</a> — отправная точка поиска неисправностей: проверка процессов, ошибки DNS при join, <code>samba-tool dbcheck --cross-ncs</code>.</li>
+</ul>
+<h2>Эксплуатация: FSMO, бэкапы, обновление, понижение роли</h2>
+<ul>
+<li><a href="notes/%D0%9F%D0%B5%D1%80%D0%B5%D0%B4%D0%B0%D1%87%D0%B0-%D0%B8-%D0%B7%D0%B0%D1%85%D0%B2%D0%B0%D1%82-FSMO-%D1%80%D0%BE%D0%BB%D0%B5%D0%B9.html">Передача и захват FSMO ролей</a> — плановый <code>samba-tool fsmo transfer</code> и аварийный <code>fsmo seize</code>; просмотр владельцев семи ролей через <code>samba-tool fsmo show</code>.</li>
+<li><a href="notes/%D0%9F%D0%BE%D0%BD%D0%B8%D0%B6%D0%B5%D0%BD%D0%B8%D0%B5-%D1%80%D0%BE%D0%BB%D0%B8-AD-DC.html">Понижение роли AD DC</a> — корректный вывод DC из домена: <code>demote</code> для работающего DC и <code>--remove-other-dead-server</code> для безвозвратно погибшего.</li>
+<li><a href="notes/%D0%A0%D0%B5%D0%B7%D0%B5%D1%80%D0%B2%D0%BD%D0%BE%D0%B5-%D0%BA%D0%BE%D0%BF%D0%B8%D1%80%D0%BE%D0%B2%D0%B0%D0%BD%D0%B8%D0%B5-%D0%B8-%D0%B2%D0%BE%D1%81%D1%81%D1%82%D0%B0%D0%BD%D0%BE%D0%B2%D0%BB%D0%B5%D0%BD%D0%B8%D0%B5-AD-DC.html">Резервное копирование и восстановление AD DC</a> — online/offline/rename бэкапы через <code>samba-tool domain backup</code> и восстановление нового DC с переприсоединением остальных.</li>
+<li><a href="notes/%D0%9E%D0%B1%D0%BD%D0%BE%D0%B2%D0%BB%D0%B5%D0%BD%D0%B8%D0%B5-Samba.html">Обновление Samba</a> — порядок обновления: остановка служб, бэкап, release notes, dbcheck; заметные изменения версий 4.0.x–4.6.x.</li>
+<li><a href="notes/%D0%9E%D0%B1%D0%BD%D0%BE%D0%B2%D0%BB%D0%B5%D0%BD%D0%B8%D0%B5-%D0%BD%D0%B5%D1%81%D0%BA%D0%BE%D0%BB%D1%8C%D0%BA%D0%B8%D1%85-DC.html">Обновление нескольких DC</a> — порядок обновления сети контроллеров: сначала DC без FSMO-ролей, держатели ролей в конце; drs showrepl и dbcheck после каждого шага, метод rejoin для мажорных переходов.</li>
+<li><a href="notes/%D0%A0%D0%B5%D0%BF%D0%BB%D0%B8%D0%BA%D0%B0%D1%86%D0%B8%D1%8F-SysVol.html">Репликация SysVol</a> — обход отсутствия DFS-R/FRS: односторонний rsync с PDC Emulator (xinetd, rsyncd.secret, cron каждые 5 минут); предпосылка — одинаковые idmap.ldb на всех DC.</li>
+<li><a href="notes/%D0%9C%D0%BE%D0%BD%D0%B8%D1%82%D0%BE%D1%80%D0%B8%D0%BD%D0%B3-%D0%B8-%D0%B0%D0%B2%D1%82%D0%BE%D0%BC%D0%B0%D1%82%D0%B8%D0%B7%D0%B0%D1%86%D0%B8%D1%8F-Samba-AD-DC.html">Мониторинг и автоматизация Samba AD DC</a> — регулярные проверки: <code>drs showrepl --json</code>, <code>dbcheck --cross-ncs</code>, <code>ldapcmp</code>, <code>ntacl sysvolcheck</code>, неинтерактивный samba-tool через PASSWD_FD и Ansible-коллекции для управления DC.</li>
+</ul>
+<h2>Члены домена, общие папки и печать</h2>
+<ul>
+<li><a href="notes/Samba-%D0%BA%D0%B0%D0%BA-%D1%87%D0%BB%D0%B5%D0%BD-%D0%B4%D0%BE%D0%BC%D0%B5%D0%BD%D0%B0.html">Samba как член домена</a> — ввод Linux-сервера в домен: DNS и krb5.conf, выбор idmap-бэкенда (ad/autorid/rid), <code>net ads join</code>, NSS и winbind.</li>
+<li><a href="notes/Idmap-%D0%B1%D1%8D%D0%BA%D0%B5%D0%BD%D0%B4%D1%8B-%D0%B8-RFC2307.html">Idmap бэкенды и RFC2307</a> — настройка idmap config ad/rid/autorid: примеры smb.conf, требования к диапазонам, RFC2307-атрибуты (uidNumber/gidNumber) через NIS-расширения и ADUC.</li>
+<li><a href="notes/%D0%93%D1%80%D1%83%D0%BF%D0%BF%D0%BE%D0%B2%D1%8B%D0%B5-%D0%9F%D0%BE%D0%BB%D0%B8%D1%82%D0%B8%D0%BA%D0%B8-GPO.html">Групповые Политики GPO</a> — полный цикл GPO: <code>samba-tool gpo</code> (create/backup/restore/admxload/manage) и хранение политик в SYSVOL, загрузка ADMX-шаблонов, применение на Linux-членах через <code>samba-gpupdate</code>; GPMC/RSAT — штатный способ администрирования, а ограничение Windows 10/Server 2016 — отсутствие вкладки Unix Attributes (<code>Server for NIS Tools</code>) в ADUC: RFC2307-атрибуты задают вручную.</li>
+<li><a href="notes/%D0%9E%D0%B1%D1%89%D0%B8%D0%B9-%D1%80%D0%B5%D1%81%D1%83%D1%80%D1%81-%D1%81-Windows-ACL.html">Общий ресурс с Windows ACL</a> — шара с правами через Windows ACL: acl_xattr, SeDiskOperatorPrivilege, настройка из Computer Management.</li>
+<li><a href="notes/%D0%9E%D0%B1%D1%89%D0%B8%D0%B9-%D1%80%D0%B5%D1%81%D1%83%D1%80%D1%81-%D1%81-POSIX-ACL.html">Общий ресурс с POSIX ACL</a> — шара на POSIX ACL: chmod 2770, setfacl, map acl inherit; на Samba AD DC доступны только Windows ACL.</li>
+<li><a href="notes/%D0%9D%D0%B0%D1%81%D1%82%D1%80%D0%BE%D0%B9%D0%BA%D0%B0-%D0%BF%D1%80%D0%B8%D0%BD%D1%82-%D1%81%D0%B5%D1%80%D0%B2%D0%B5%D1%80%D0%B0.html">Настройка принт сервера</a> — бэкенды CUPS и LPRng, служба spoolssd, шара [printers], драйверы для Windows 11 22H2/Server 2022.</li>
+<li><a href="notes/CTDB-%D0%B8-%D0%BA%D0%BB%D0%B0%D1%81%D1%82%D0%B5%D1%80%D0%BD%D1%8B%D0%B9-Samba.html">CTDB и кластерный Samba</a> — высокодоступный кластер CIFS-серверов на CTDB: кластеризованный TDB, мониторинг узлов, пул публичных IP-адресов.</li>
+</ul>
+<h2>Расширение из интернета</h2>
+<blockquote>
+<p>Добавлено: 2026-10-13 — материалы из интернета, которым не нашлось места в тематических разделах выше: харденинг, аудит и JSON-логи, сертификаты (LDAPS и PKINIT), gMSA, доверия между доменами и мандатный контроль доступа (SELinux/AppArmor).</p>
+</blockquote>
+<ul>
+<li><a href="notes/%D0%A5%D0%B0%D1%80%D0%B4%D0%B5%D0%BD%D0%B8%D0%BD%D0%B3-Samba-AD-DC.html">Харденинг Samba AD DC</a> — официальный чек-лист «Hardening Samba as an AD DC»: параметры smb.conf (strong auth, ntlm auth, nt hash store, TLS), харденинг хоста и сборки, шифрование секретов на диске, Protected Users, PSO и парольные политики — всё сверено с smb.conf(5) 4.25.0.</li>
+<li><a href="notes/%D0%90%D1%83%D0%B4%D0%B8%D1%82-%D0%B8-JSON-%D0%BB%D0%BE%D0%B3%D0%B8-Samba.html">Аудит и JSON логи Samba</a> — аудит через debug-классы auth_audit/dsdb_audit и их JSON-варианты, вынос событий в отдельный файл через @PATH, централизация через rsyslog imfile, блокировка перебора через fail2ban и изменения формата в 4.25.</li>
+<li><a href="notes/LDAPS-%D0%A1%D0%B5%D1%80%D1%82%D0%B8%D1%84%D0%B8%D0%BA%D0%B0%D1%82%D1%8B-AD-DC.html">LDAPS Сертификаты AD DC</a> — LDAPS на DC: параметры tls в smb.conf, самоподписанный сертификат и его замена на выданный CA, перезагрузка сертификатов без рестарта через <code>smbcontrol ldap_server reload-certs</code> (4.19), TLS channel bindings (4.21) и проверки через openssl.</li>
+<li><a href="notes/%D0%A1%D0%B5%D1%80%D1%82%D0%B8%D1%84%D0%B8%D0%BA%D0%B0%D1%82%D0%BD%D1%8B%D0%B9-%D0%92%D1%85%D0%BE%D0%B4-PKINIT-KeyTrust.html">Сертификатный Вход PKINIT KeyTrust</a> — вход по сертификату: настройка KDC для PKINIT (enable-pkinit, pkinit_anchors, pkinit_revoke), отзыв сертификатов с 4.19, команды keytrust/generate-csr в 4.24 и включённая по умолчанию строгая привязка сертификатов.</li>
+<li><a href="notes/%D0%A3%D0%BF%D1%80%D0%B0%D0%B2%D0%BB%D1%8F%D0%B5%D0%BC%D1%8B%D0%B5-%D0%A1%D0%B5%D1%80%D0%B2%D0%B8%D1%81%D0%BD%D1%8B%D0%B5-%D0%90%D0%BA%D0%BA%D0%B0%D1%83%D0%BD%D1%82%D1%8B-gMSA.html">Управляемые Сервисные Аккаунты gMSA</a> — групповые управляемые сервисные учётные записи: <code>samba-tool service-account</code> и group-msa-membership, обязательный KDS root key, получение секретов и билета через getpassword/get-kerberos-ticket.</li>
+<li><a href="notes/%D0%94%D0%BE%D0%B2%D0%B5%D1%80%D0%B8%D1%82%D0%B5%D0%BB%D1%8C%D0%BD%D1%8B%D0%B5-%D0%BE%D1%82%D0%BD%D0%BE%D1%88%D0%B5%D0%BD%D0%B8%D1%8F-%D0%BC%D0%B5%D0%B6%D0%B4%D1%83-%D0%B4%D0%BE%D0%BC%D0%B5%D0%BD%D0%B0%D0%BC%D0%B8.html">Доверительные отношения между доменами</a> — external- и forest-доверия между доменами Samba AD: полный набор <code>samba-tool domain trust</code>, последовательность настройки обеих сторон, DNS-пересылка, проверка validate и AES-ключи после CVE-2022-37966.</li>
+<li><a href="notes/SELinux-%D0%B8-AppArmor-%D0%B4%D0%BB%D1%8F-Samba-AD-DC.html">SELinux и AppArmor для Samba AD DC</a> — мандатный контроль доступа: диагностика SELinux, сборка модуля через audit2allow и semodule, булевы samba_* и метки samba_share_t, профили AppArmor для smbd/nmbd и интеграция с BIND9_DLZ.</li>
+</ul>
+<h2>Администрирование: пользователи, группы, OU</h2>
+<blockquote>
+<p>Добавлено: 2026-10-22 — практический справочник по управлению объектами AD и по работе из Windows.</p>
+</blockquote>
+<ul>
+<li><a href="notes/%D0%A3%D0%BF%D1%80%D0%B0%D0%B2%D0%BB%D0%B5%D0%BD%D0%B8%D0%B5-%D0%BF%D0%BE%D0%BB%D1%8C%D0%B7%D0%BE%D0%B2%D0%B0%D1%82%D0%B5%D0%BB%D1%8F%D0%BC%D0%B8-%D0%B3%D1%80%D1%83%D0%BF%D0%BF%D0%B0%D0%BC%D0%B8-%D0%B8-OU.html">Управление пользователями группами и OU</a> — полный справочник <code>samba-tool</code>: пользователи (create/addunixattrs/getpassword/setpassword/unlock/setexpiry/…), группы (add/addmembers/listmembers/stats…), OU (add/move/rename/listobjects с onelevel/subtree), компьютеры, делегирование Kerberos и парольные политики; синтаксис сверен с Samba 4.22.11.</li>
+<li><a href="notes/PowerShell-%D0%BA%D0%BE%D0%BC%D0%B0%D0%BD%D0%B4%D0%BB%D0%B5%D1%82%D1%8B-AD-%D0%B8-%D0%B0%D1%82%D1%80%D0%B8%D0%B1%D1%83%D1%82%D1%8B.html">PowerShell командлеты AD и атрибуты</a> — администрирование из Windows: RSAT, модуль ActiveDirectory (работает только через ADWS — в Samba он не реализован, bug 11231), рабочие способы через LDAP из PowerShell; данные объектов: атрибуты, флаги userAccountControl, groupType, well-known SIDs.</li>
+</ul>
+<h2>Обзор и справочник</h2>
+<ul>
+<li><a href="notes/%D0%93%D0%BB%D0%B0%D0%B2%D0%BD%D0%B0%D1%8F-Samba-Wiki.html">Главная Samba Wiki</a> — входная точка официальной документации: разделы, актуальные релизы, новости.</li>
+<li><a href="notes/%D0%9F%D0%BE%D0%BB%D1%8C%D0%B7%D0%BE%D0%B2%D0%B0%D1%82%D0%B5%D0%BB%D1%8C%D1%81%D0%BA%D0%B0%D1%8F-%D0%B4%D0%BE%D0%BA%D1%83%D0%BC%D0%B5%D0%BD%D1%82%D0%B0%D1%86%D0%B8%D1%8F.html">Пользовательская документация</a> — полный индекс пользовательской документации Samba Wiki.</li>
+<li><a href="notes/FAQ-Samba.html">FAQ Samba</a> — частые вопросы: лимиты TDB/LMDB, стабильность AD DC, репликация, типовые ошибки.</li>
+<li><a href="notes/Man-%D1%81%D1%82%D1%80%D0%B0%D0%BD%D0%B8%D1%86%D1%8B-Samba.html">Man страницы Samba</a> — указатель online-man-документации: smb.conf и все утилиты.</li>
+<li><a href="notes/%D0%A2%D0%B5%D0%BA%D1%83%D1%89%D0%B8%D0%B5-%D1%81%D0%BE%D0%B1%D1%8B%D1%82%D0%B8%D1%8F.html">Текущие события</a> — календарь конференций сообщества (Fosdem, SambaXP).</li>
+<li><a href="notes/%D0%9F%D1%80%D0%B5%D0%B7%D0%B5%D0%BD%D1%82%D0%B0%D1%86%D0%B8%D0%B8-Samba.html">Презентации Samba</a> — архив докладов 2010–2020: sambaXP, FOSDEM, Linux.conf.au.</li>
+</ul>
+<h2>Разработка Samba</h2>
+<ul>
+<li><a href="notes/%D0%94%D0%BE%D0%BA%D1%83%D0%BC%D0%B5%D0%BD%D1%82%D0%B0%D1%86%D0%B8%D1%8F-%D1%80%D0%B0%D0%B7%D1%80%D0%B0%D0%B1%D0%BE%D1%82%D1%87%D0%B8%D0%BA%D0%B0.html">Документация разработчика</a> — каталог документации для разработчиков: кодовая база, тестирование, отладка, VFS-модули, кластеризация.</li>
+<li><a href="notes/%D0%9D%D0%B0%D0%BF%D0%B8%D1%81%D0%B0%D0%BD%D0%B8%D0%B5-torture-%D1%82%D0%B5%D1%81%D1%82%D0%BE%D0%B2.html">Написание torture тестов</a> — torture-тесты smbtorture: структура source4/torture, макросы torture_assert_*, selftest и knownfail.</li>
+<li><a href="notes/Git-%D0%B4%D0%BB%D1%8F-%D1%80%D0%B0%D0%B7%D1%80%D0%B0%D0%B1%D0%BE%D1%82%D0%BA%D0%B8-Samba.html">Git для разработки Samba</a> — рабочий процесс Git: патч-серии как merge request'ы, требования к коммитам, bisectability, rebase.</li>
+<li><a href="notes/CI-Samba-%D0%BD%D0%B0-GitLab.html">CI Samba на GitLab</a> — зеркало samba-team/samba и общий репозиторий devel с бесплатным CI: ветки <code>$USER/topic</code>, MR против samba-team/samba, слияние через git autobuild, приёмы push-опций.</li>
+<li><a href="notes/Wireshark-%D1%81-keytab.html">Wireshark с keytab</a> — расшифровка SMB3- и Kerberos/DCE-RPC-трафика: SessionKey, ключи, keytab.</li>
+<li><a href="notes/%D0%97%D0%B0%D1%85%D0%B2%D0%B0%D1%82-%D0%BF%D0%B0%D0%BA%D0%B5%D1%82%D0%BE%D0%B2.html">Захват пакетов</a> — сетевые дампы tshark/tcpdump/snoop для диагностики по запросу разработчиков.</li>
+<li><a href="notes/%D0%9F%D0%BB%D0%B0%D0%BD%D0%B8%D1%80%D0%BE%D0%B2%D0%B0%D0%BD%D0%B8%D0%B5-%D1%80%D0%B5%D0%BB%D0%B8%D0%B7%D0%BE%D0%B2-Samba.html">Планирование релизов Samba</a> — цикл релизов: 18 месяцев поддержки на серию, пять режимов, регламент бэкпортов.</li>
+</ul>
+<h2>Участие в проекте</h2>
+<ul>
+<li><a href="notes/%D0%92%D0%BA%D0%BB%D0%B0%D0%B4-%D0%B2-%D0%BA%D0%BE%D0%B4-Samba.html">Вклад в код Samba</a> — как внести вклад: merge request на GitLab, требования к коммитам (Signed-off-by, BUG, RN), тесты и ревью.</li>
+<li><a href="notes/%D0%9A%D0%BE%D0%B4-%D1%80%D0%B5%D0%B2%D1%8C%D1%8E.html">Код ревью</a> — обязательный процесс: код члена команды проверяет ещё один член (авторство засчитывается как одно из двух ревью), внешний код — двое членов Samba Team; теги Reviewed-by/Signed-off-by, стиль кода на C, Python и shell.</li>
+<li><a href="notes/%D0%92%D0%BA%D0%BB%D0%B0%D0%B4-%D0%B2-%D0%B4%D0%BE%D0%BA%D1%83%D0%BC%D0%B5%D0%BD%D1%82%D0%B0%D1%86%D0%B8%D1%8E.html">Вклад в документацию</a> — навигационный указатель материалов о внесении вклада.</li>
+<li><a href="notes/%D0%A1%D0%BE%D0%BE%D0%B1%D1%89%D0%B5%D0%BD%D0%B8%D0%B5-%D0%BE%D0%B1-%D0%BE%D1%88%D0%B8%D0%B1%D0%BA%D0%B0%D1%85.html">Сообщение об ошибках</a> — Bugzilla и security@samba.org; выбор багтрекера для cifs.ko и сбор отладочных данных.</li>
+<li><a href="notes/%D0%A1%D0%BE%D0%BE%D0%B1%D1%89%D0%B5%D0%BD%D0%B8%D0%B5-%D0%BE%D0%B1-%D0%BE%D1%88%D0%B8%D0%B1%D0%BA%D0%B5-%D0%B2-%D0%B4%D0%BE%D0%BA%D1%83%D0%BC%D0%B5%D0%BD%D1%82%D0%B0%D1%86%D0%B8%D0%B8.html">Сообщение об ошибке в документации</a> — как сообщить об ошибке в Wiki или man-страницах через Bugzilla.</li>
+<li><a href="notes/%D0%9A%D0%B0%D0%BA-%D0%B4%D0%B5%D0%BB%D0%B0%D1%82%D1%8C-Samba-%D1%85%D0%BE%D1%80%D0%BE%D1%88%D0%BE.html">Как делать Samba хорошо</a> — правила общения в списках рассылки, корректные баг-репорты и этикет код-ревью.</li>
+<li><a href="notes/%D0%9F%D1%80%D0%BE%D0%B3%D1%80%D0%B0%D0%BC%D0%BC%D0%B0-GSoC.html">Программа GSoC</a> — Google Summer of Code в Samba: список идей, требования к заявке, архивы проектов.</li>
+</ul>
+<h2>С чего начать: развёртывание контроллера домена с нуля</h2>
+<ol>
+<li><a href="notes/%D0%93%D0%BB%D0%B0%D0%B2%D0%BD%D0%B0%D1%8F-Samba-Wiki.html">Главная Samba Wiki</a> — сориентироваться в документации и актуальных версиях Samba.</li>
+<li><a href="notes/%D0%98%D0%BC%D0%B5%D0%BD%D0%BE%D0%B2%D0%B0%D0%BD%D0%B8%D0%B5-%D0%B4%D0%BE%D0%BC%D0%B5%D0%BD%D0%B0-FAQ.html">Именование домена FAQ</a> — выбрать DNS-домен, realm и NetBIOS-имя: после provision их не изменить.</li>
+<li><a href="notes/%D0%A3%D1%81%D1%82%D0%B0%D0%BD%D0%BE%D0%B2%D0%BA%D0%B0-Samba-AD-DC.html">Установка Samba AD DC</a> — установить Samba и выполнить provision первого контроллера домена.</li>
+<li><a href="notes/%D0%A3%D0%BF%D1%80%D0%B0%D0%B2%D0%BB%D0%B5%D0%BD%D0%B8%D0%B5-%D1%81%D0%BB%D1%83%D0%B6%D0%B1%D0%BE%D0%B9-AD-DC.html">Управление службой AD DC</a> — настроить автозапуск службы; при сборке из исходников создать unit-файл samba-ad-dc.service.</li>
+<li><a href="notes/%D0%A1%D0%B8%D0%BD%D1%85%D1%80%D0%BE%D0%BD%D0%B8%D0%B7%D0%B0%D1%86%D0%B8%D1%8F-%D0%B2%D1%80%D0%B5%D0%BC%D0%B5%D0%BD%D0%B8.html">Синхронизация времени</a> — настроить NTP на DC, иначе Kerberos будет отказывать в доступе.</li>
+<li><a href="notes/%D0%9F%D0%BE%D1%80%D1%82%D1%8B-AD-DC.html">Порты AD DC</a> — открыть порты контроллера домена в межсетевом экране.</li>
+<li><a href="notes/%D0%92%D0%BD%D1%83%D1%82%D1%80%D0%B5%D0%BD%D0%BD%D0%B8%D0%B9-DNS-%D0%B1%D1%8D%D0%BA%D0%B5%D0%BD%D0%B4.html">Внутренний DNS бэкенд</a> — проверить DNS-бэкенд: форвардеры, динамические обновления, свободный порт 53.</li>
+<li><a href="notes/%D0%9F%D1%80%D0%B8%D1%81%D0%BE%D0%B5%D0%B4%D0%B8%D0%BD%D0%B5%D0%BD%D0%B8%D0%B5-%D0%B2%D1%82%D0%BE%D1%80%D0%BE%D0%B3%D0%BE-DC-%D0%BA-%D0%B4%D0%BE%D0%BC%D0%B5%D0%BD%D1%83.html">Присоединение второго DC к домену</a> — добавить второй DC для отказоустойчивости, проверить репликацию каталога и настроить <a href="notes/%D0%A0%D0%B5%D0%BF%D0%BB%D0%B8%D0%BA%D0%B0%D1%86%D0%B8%D1%8F-SysVol.html">Репликация SysVol</a>.</li>
+<li><a href="notes/%D0%9F%D0%B5%D1%80%D0%B5%D0%B4%D0%B0%D1%87%D0%B0-%D0%B8-%D0%B7%D0%B0%D1%85%D0%B2%D0%B0%D1%82-FSMO-%D1%80%D0%BE%D0%BB%D0%B5%D0%B9.html">Передача и захват FSMO ролей</a> — понять, где живут FSMO-роли, и уметь их переносить и захватывать.</li>
+<li><a href="notes/%D0%A0%D0%B5%D0%B7%D0%B5%D1%80%D0%B2%D0%BD%D0%BE%D0%B5-%D0%BA%D0%BE%D0%BF%D0%B8%D1%80%D0%BE%D0%B2%D0%B0%D0%BD%D0%B8%D0%B5-%D0%B8-%D0%B2%D0%BE%D1%81%D1%81%D1%82%D0%B0%D0%BD%D0%BE%D0%B2%D0%BB%D0%B5%D0%BD%D0%B8%D0%B5-AD-DC.html">Резервное копирование и восстановление AD DC</a> — наладить регулярное резервное копирование домена.</li>
+<li><a href="notes/%D0%9E%D0%B1%D0%BD%D0%BE%D0%B2%D0%BB%D0%B5%D0%BD%D0%B8%D0%B5-Samba.html">Обновление Samba</a> и <a href="notes/%D0%9E%D0%B1%D0%BD%D0%BE%D0%B2%D0%BB%D0%B5%D0%BD%D0%B8%D0%B5-%D0%BD%D0%B5%D1%81%D0%BA%D0%BE%D0%BB%D1%8C%D0%BA%D0%B8%D1%85-DC.html">Обновление нескольких DC</a> — освоить безопасный порядок обновлений с dbcheck и чтением release notes.</li>
+<li><a href="notes/%D0%94%D0%B8%D0%B0%D0%B3%D0%BD%D0%BE%D1%81%D1%82%D0%B8%D0%BA%D0%B0-AD-DC.html">Диагностика AD DC</a> — держать под рукой как отправную точку, когда что-то пойдёт не так.</li>
+<li><a href="notes/Samba-%D0%BA%D0%B0%D0%BA-%D1%87%D0%BB%D0%B5%D0%BD-%D0%B4%D0%BE%D0%BC%D0%B5%D0%BD%D0%B0.html">Samba как член домена</a>, <a href="notes/Idmap-%D0%B1%D1%8D%D0%BA%D0%B5%D0%BD%D0%B4%D1%8B-%D0%B8-RFC2307.html">Idmap бэкенды и RFC2307</a> и <a href="notes/%D0%9E%D0%B1%D1%89%D0%B8%D0%B9-%D1%80%D0%B5%D1%81%D1%83%D1%80%D1%81-%D1%81-Windows-ACL.html">Общий ресурс с Windows ACL</a> — добавить файловый сервис для пользователей на члене домена.</li>
+</ol>
+</main>
+</body>
+</html>

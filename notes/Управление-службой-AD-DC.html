@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Управление службой Samba AD DC</title>
+<link rel="stylesheet" href="../style.css">
+</head>
+<body>
+<nav><a href="../index.html">База знаний Samba AD DC</a></nav>
+<main><h1>Управление службой Samba AD DC</h1>
+<h2>Суть</h2>
+<p>Страница «Managing the Samba AD DC Service» — обзорная точка входа по управлению службой контроллера домена Samba; она сводит три способа: через systemd, через init-скрипт и через Upstart (каждому посвящена отдельная страница вики). Ключевой факт повседневной эксплуатации: на DC служба <code>/usr/local/samba/sbin/samba</code> сама запускает требуемые службы <code>smbd</code> и <code>winbindd</code> как подпроцессы, поэтому отдельно их запускать нельзя. Поставляемого unit-файла systemd у Samba нет — при сборке DC из исходников его создают вручную, после чего службой управляют стандартными <code>systemctl enable/disable/start/stop</code>.</p>
+<h2>Ключевое</h2>
+<h3>Служба samba на контроллере домена</h3>
+<ul>
+<li>На DC служба <code>/usr/local/samba/sbin/samba</code> автоматически запускает необходимые <code>smbd</code> и <code>winbindd</code> как подпроцессы (страница Using Systemd, раздел «The samba Service»).</li>
+<li>Если пакетный поставщик создал дополнительные файлы служб Samba, их нужно отключить и замаскировать, чтобы другие службы не смогли снова их включить:</li>
+</ul>
+<pre><code># systemctl mask smbd nmbd winbind
+# systemctl disable smbd nmbd winbind
+</code></pre>
+<h3>Управление через systemd (основной способ для современных ОС)</h3>
+<ol>
+<li>Samba не поставляет unit-файл systemd. Если контроллер домена собран из исходников, создайте файл <code>/etc/systemd/system/samba-ad-dc.service</code> со следующим содержимым:</li>
+</ol>
+<pre><code>[Unit]
+Description=Samba Active Directory Domain Controller
+After=network.target remote-fs.target nss-lookup.target
+
+[Service]
+Type=forking
+ExecStart=/usr/local/samba/sbin/samba -D
+PIDFile=/usr/local/samba/var/run/samba.pid
+ExecReload=/bin/kill -HUP $MAINPID
+
+[Install]
+WantedBy=multi-user.target
+</code></pre>
+<ol start="2">
+<li>Перечитайте конфигурацию systemd:</li>
+</ol>
+<pre><code># systemctl daemon-reload
+</code></pre>
+<ol start="3">
+<li>Включить автозапуск службы при загрузке системы:</li>
+</ol>
+<pre><code># systemctl enable samba-ad-dc
+</code></pre>
+<ol start="4">
+<li>Отключить автозапуск:</li>
+</ol>
+<pre><code># systemctl disable samba-ad-dc
+</code></pre>
+<ol start="5">
+<li>Ручной запуск и остановка:</li>
+</ol>
+<pre><code># systemctl start samba-ad-dc
+# systemctl stop samba-ad-dc
+</code></pre>
+<p>Все перечисленное предполагает, что служба управляется файлом <code>samba-ad-dc</code>; если unit-файл не создавался вручную, имя службы Samba AD DC нужно смотреть в документации своей ОС. Подробности — на man-странице systemd.service(5).</p>
+<h3>Управление через init-скрипт (устаревшие ОС)</h3>
+<ul>
+<li>Для ОС, использующих другие системы управления службами (например, systemd), вики отсылает к способу через systemd; на Red Hat Enterprise Linux новее версии 6 используется именно systemd.</li>
+<li>Скрипт создаётся как <code>/etc/init.d/samba-ad-dc</code> (на странице вики приведены готовые варианты для Red Hat Enterprise Linux 6 и Debian; в Debian при необходимости правят пути к <code>samba</code>, утилите <code>samba-tool</code> и файлу <code>smb.conf</code> внутри скрипта).</li>
+<li>Сделать скрипт исполняемым:</li>
+</ul>
+<pre><code># chmod 755 /etc/init.d/samba-ad-dc
+</code></pre>
+<ul>
+<li>Включение и отключение автозапуска (RHEL 6):</li>
+</ul>
+<pre><code># chkconfig samba-ad-dc enable
+# chkconfig samba-ad-dc disable
+</code></pre>
+<ul>
+<li>Включение и отключение автозапуска (Debian):</li>
+</ul>
+<pre><code># update-rc.d samba-ad-dc defaults
+# update-rc.d -f samba-ad-dc remove
+</code></pre>
+<ul>
+<li>Ручной запуск и остановка:</li>
+</ul>
+<pre><code># service start samba-ad-dc
+# service stop samba-ad-dc
+</code></pre>
+<p>Способ включения/отключения службы зависит от ОС — сверяйтесь с её документацией.</p>
+<h3>Управление через Upstart</h3>
+<p>Загрузить конфиг-файл Upstart:</p>
+<pre><code>$ wget -O /etc/init/samba-ad-dc.conf &quot;https://salsa.debian.org/samba-team/samba/raw/jessie/debian/samba-ad-dc.upstart&quot;
+</code></pre>
+<p>Сама процедура вики помечена предупреждением о непроверенном внешнем содержимом (см. «Подводные камни»).</p>
+<h2>Подводные камни</h2>
+<ul>
+<li><strong>Не запускайте <code>smbd</code> и <code>winbindd</code> на DC вручную.</strong> Служба <code>/usr/local/samba/sbin/samba</code> сама запускает их как подпроцессы; при ручном запуске Samba DC не работает, как ожидается.</li>
+<li><strong>Маскируйте службы от пакетного поставщика</strong> (<code>systemctl mask smbd nmbd winbind</code>), а не только отключайте — иначе другие службы смогут снова их включить.</li>
+<li><strong>Unit-файл systemd не входит в поставку Samba</strong> — при сборке из исходников его создаёт администратор. Если вы его не создавали, точное имя службы Samba AD DC смотрите в документации своей ОС.</li>
+<li><strong>Debian init-скрипт может отказать в старте из-за прав на TLS-ключ (CVE-2013-4475).</strong> Скрипт проверяет права на <code>/usr/local/samba/private/tls/key.pem</code>: если они не <code>600</code>, выводится «wrong permission on ... must be 600» и «samba will not start (CVE-2013-4475)»; удаление всех tls <code>.pem</code>-файлов вызовет их авторегенерацию с корректными правами.</li>
+<li><strong>Способ для Upstart ссылается на непроверенный внешний контент</strong> (предупреждение на странице вики), а его источник — конфиг из ветки <code>jessie</code> репозитория Debian.</li>
+</ul>
+<h2>Связанные заметки</h2>
+<ul>
+<li><a href="%D0%A3%D1%81%D1%82%D0%B0%D0%BD%D0%BE%D0%B2%D0%BA%D0%B0-Samba-AD-DC.html">Установка Samba AD DC</a></li>
+<li><a href="%D0%9F%D0%BE%D0%BD%D0%B8%D0%B6%D0%B5%D0%BD%D0%B8%D0%B5-%D1%80%D0%BE%D0%BB%D0%B8-AD-DC.html">Понижение роли AD DC</a></li>
+<li><a href="%D0%A0%D0%B5%D0%B7%D0%B5%D1%80%D0%B2%D0%BD%D0%BE%D0%B5-%D0%BA%D0%BE%D0%BF%D0%B8%D1%80%D0%BE%D0%B2%D0%B0%D0%BD%D0%B8%D0%B5-%D0%B8-%D0%B2%D0%BE%D1%81%D1%81%D1%82%D0%B0%D0%BD%D0%BE%D0%B2%D0%BB%D0%B5%D0%BD%D0%B8%D0%B5-AD-DC.html">Резервное копирование и восстановление AD DC</a></li>
+<li><a href="%D0%94%D0%B8%D0%B0%D0%B3%D0%BD%D0%BE%D1%81%D1%82%D0%B8%D0%BA%D0%B0-AD-DC.html">Диагностика AD DC</a></li>
+</ul>
+</main>
+</body>
+</html>
